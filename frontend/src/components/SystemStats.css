@@ -1,0 +1,307 @@
+.stats-container {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.stats-header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.stats-title {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.stats-subtitle {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* Error & Loading States */
+.stats-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 20px;
+  background-color: var(--bg-card);
+  border: 1px solid var(--accent-danger);
+  border-radius: var(--radius-md);
+}
+
+.stats-error-icon {
+  color: var(--accent-danger);
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.stats-error-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.stats-error-desc {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.stats-error-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.stats-loading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 40px;
+  justify-content: center;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.loading-spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--border-default);
+  border-top-color: var(--accent-primary);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Cards */
+.stats-card {
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: 20px;
+}
+
+.stats-card-full {
+  width: 100%;
+}
+
+.stats-grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+@media (max-width: 640px) {
+  .stats-grid-2 {
+    grid-template-columns: 1fr;
+  }
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.card-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+}
+
+.card-header-left h3 {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.card-badge {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 3px 10px;
+  border-radius: 9999px;
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  color: var(--text-secondary);
+}
+
+.card-badge-success {
+  border-color: rgba(34, 197, 94, 0.3);
+  color: var(--accent-success);
+  background-color: rgba(34, 197, 94, 0.1);
+}
+
+/* CPU Cores */
+.cpu-cores-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(36px, 1fr));
+  gap: 6px;
+}
+
+.cpu-core {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.cpu-core-bar-bg {
+  width: 100%;
+  height: 48px;
+  background-color: var(--bg-elevated);
+  border-radius: 4px;
+  position: relative;
+  overflow: hidden;
+}
+
+.cpu-core-bar-fill {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  border-radius: 4px;
+  transition: height 0.5s ease;
+}
+
+.cpu-core-label {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+}
+
+/* Progress Bars */
+.card-value {
+  font-size: 14px;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  margin-bottom: 10px;
+}
+
+.card-value-dim {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.progress-bar {
+  width: 100%;
+  height: 6px;
+  background-color: var(--bg-elevated);
+  border-radius: 9999px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: 9999px;
+  transition: width 0.5s ease;
+}
+
+/* Battery */
+.battery-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.battery-visual {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.battery-shell {
+  width: 52px;
+  height: 24px;
+  border: 2px solid var(--border-default);
+  border-radius: 4px;
+  padding: 2px;
+  background-color: var(--bg-elevated);
+}
+
+.battery-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.5s ease;
+}
+
+.battery-cap {
+  width: 4px;
+  height: 10px;
+  background-color: var(--border-default);
+  border-radius: 0 2px 2px 0;
+}
+
+.battery-percent {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.battery-time {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* Temperatures */
+.temp-error,
+.temp-empty {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.temp-sensors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+}
+
+.temp-sensor-group {
+  min-width: 160px;
+}
+
+.temp-sensor-name {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-bottom: 1px solid var(--border-default);
+  padding-bottom: 6px;
+  margin-bottom: 8px;
+}
+
+.temp-readings {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.temp-reading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.temp-label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.temp-value {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+}
