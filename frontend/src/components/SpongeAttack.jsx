@@ -8,7 +8,20 @@ const SpongeAttack = () => {
   const [bestResult, setBestResult] = useState(null);
   const [generations, setGenerations] = useState(5);
   const [population, setPopulation] = useState(10);
+  const [selectedModel, setSelectedModel] = useState('gpt2');
   const terminalRef = useRef(null);
+
+  const models = [
+    { id: 'gpt2', label: 'GPT-2 Small (124M)', size: '~1 GB' },
+    { id: 'gpt2-medium', label: 'GPT-2 Medium (355M)', size: '~1.5 GB' },
+    { id: 'gpt2-large', label: 'GPT-2 Large (774M)', size: '~3-4 GB' },
+    { id: 'gpt2-xl', label: 'GPT-2 XL (1.5B)', size: '~6-8 GB' },
+    { id: 'facebook/opt-2.7b', label: 'OPT-2.7B', size: '~14 GB' },
+    { id: 'facebook/opt-6.7b', label: 'OPT-6.7B', size: '~20 GB' },
+    { id: 'facebook/opt-13b', label: 'OPT-13B', size: '~32 GB' },
+    { id: 'mistralai/Mistral-7B-v0.1', label: 'Mistral-7B', size: '~12 GB' },
+    { id: 'meta-llama/Llama-2-7b-hf', label: 'LLaMA 2-7B', size: '~14 GB' },
+  ];
 
   const scrollToBottom = () => {
     if (terminalRef.current) {
@@ -42,7 +55,7 @@ const SpongeAttack = () => {
   const startAttack = async () => {
     try {
       const response = await fetch(
-        `http://localhost:8000/api/attack/start?gens=${generations}&pop=${population}`,
+        `http://localhost:8000/api/attack/start?model_id=${encodeURIComponent(selectedModel)}&gens=${generations}&pop=${population}`,
         { method: 'POST' }
       );
 
@@ -78,6 +91,21 @@ const SpongeAttack = () => {
       </div>
 
       <div className="attack-controls">
+        <div className="control-group">
+          <label className="control-label">Target Model</label>
+          <select
+            className="control-input"
+            value={selectedModel}
+            onChange={(e) => setSelectedModel(e.target.value)}
+            disabled={isRunning}
+          >
+            {models.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.label} ({m.size})
+              </option>
+            ))}
+          </select>
+        </div>
         <div className="control-group">
           <label className="control-label">Generations</label>
           <input
@@ -166,8 +194,14 @@ const SpongeAttack = () => {
                   <span className="metric-value metric-value-primary">{bestResult.score.toFixed(4)}</span>
                 </div>
                 <div className="metric-item">
-                  <span className="metric-label">Avg CPU Load</span>
-                  <span className="metric-value">{Number(bestResult.avg_cpu).toFixed(2)}%</span>
+                  <span className="metric-label">
+                    {bestResult.avg_gpu > 0 ? 'Avg GPU Load' : 'Avg CPU Load'}
+                  </span>
+                  <span className="metric-value">
+                    {bestResult.avg_gpu > 0 
+                      ? Number(bestResult.avg_gpu).toFixed(2) 
+                      : Number(bestResult.avg_cpu).toFixed(2)}%
+                  </span>
                 </div>
                 <div className="metric-item">
                   <span className="metric-label">Duration</span>

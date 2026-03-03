@@ -18,6 +18,15 @@ def load_model_and_tokenizer(model_id: str):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.float16 if device == "cuda" else torch.float32
 
+    # Log GPU/ROCm info
+    if device == "cuda":
+        gpu_name = torch.cuda.get_device_name(0)
+        hip_version = getattr(torch.version, 'hip', None)
+        if hip_version:
+            logger.info(f"🎮 GPU: {gpu_name} (ROCm/HIP {hip_version})")
+        else:
+            logger.info(f"🎮 GPU: {gpu_name} (CUDA {torch.version.cuda})")
+
     logger.info(f"🔄 Loading tokenizer for {model_id}...")
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -25,14 +34,14 @@ def load_model_and_tokenizer(model_id: str):
             tokenizer.pad_token_id = tokenizer.eos_token_id
         logger.info(f"✅ Tokenizer loaded.")
 
-        logger.info(f"🔄 Loading model {model_id} on {device}...")
+        logger.info(f"🔄 Loading model {model_id} on {device} ({dtype})...")
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
             dtype=dtype,
             device_map="auto" if device == "cuda" else None,
         )
         if device == "cuda":
-            logger.info(f"✅ Model loaded on CUDA.")
+            logger.info(f"✅ Model loaded on GPU ({torch.cuda.get_device_name(0)}).")
         else:
             # If not using device_map="auto" (CPU), explicitly move to device not really needed for CPU but good practice
             model.to(device)

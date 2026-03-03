@@ -1,7 +1,21 @@
 import argparse
 import sys
+import io
 import os
 import time
+
+# Force UTF-8 encoding for stdout/stderr to avoid charmap errors on Windows
+if sys.platform == "win32":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding='utf-8')
+    else:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+        
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding='utf-8')
+    else:
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
 import psutil
 import threading
 import random
@@ -34,7 +48,9 @@ class SystemMonitor:
         self.stats = {
             "temps": [],
             "cpu": [],
-            "power": [] 
+            "power": [],
+            "gpu_load": [],
+            "gpu_temp": []
         }
         self.start_time = 0
         self.end_time = 0
@@ -54,12 +70,25 @@ class SystemMonitor:
                         if current > max_temp:
                             max_temp = current
             elif platform.system() == "Windows":
-                import wmi
-                w = wmi.WMI(namespace="root\\wmi")
-                for zone in w.MSAcpi_ThermalZoneTemperature():
-                    celsius = (zone.CurrentTemperature / 10) - 273.15
-                    if celsius > max_temp:
-                        max_temp = celsius
+                # Primary: LibreHardwareMonitor .NET library
+                try:
+                    from hardware_monitor import get_max_temperature
+                    t = get_max_temperature()
+                    if t > max_temp:
+                        max_temp = t
+                except Exception:
+                    # Fallback: ACPI thermal zones
+                    try:
+                        import wmi
+                        import pythoncom
+                        pythoncom.CoInitialize()
+                        w = wmi.WMI(namespace="root\\cimv2")
+                        for zone in w.Win32_PerfFormattedData_Counters_ThermalZoneInformation():
+                            celsius = float(zone.Temperature) - 273.15
+                            if celsius > max_temp:
+                                max_temp = celsius
+                    except Exception:
+                        pass
         except:
             pass
         return max_temp
@@ -68,11 +97,22 @@ class SystemMonitor:
         while self.running:
             self.stats["temps"].append(self._get_temp())
             self.stats["cpu"].append(psutil.cpu_percent(interval=None))
+            
+            # Fetch GPU stats on Windows
+            if platform.system() == "Windows":
+                try:
+                    from hardware_monitor import get_gpu_stats
+                    g_temp, g_load = get_gpu_stats()
+                    self.stats["gpu_temp"].append(g_temp)
+                    self.stats["gpu_load"].append(g_load)
+                except:
+                    pass
+            
             time.sleep(0.1) 
 
     def start(self):
         self.running = True
-        self.stats = {"temps": [], "cpu": [], "power": []}
+        self.stats = {"temps": [], "cpu": [], "power": [], "gpu_load": [], "gpu_temp": []}
         self.start_time = time.time()
         self.token_count = 0
         self.thread = threading.Thread(target=self._monitor_loop)
@@ -87,40 +127,59 @@ class SystemMonitor:
         
     def get_score(self):
         """Calculate score based on Latency (Time) and Energy (Temp/Load)."""
-        if not self.stats["temps"]: return 0, 0, 0, 0, 0
+        if not self.stats["temps"]: return 0, 0, 0, 0, 0, 0
         
         avg_temp = statistics.mean(self.stats["temps"])
         max_temp = max(self.stats["temps"])
         avg_cpu = statistics.mean(self.stats["cpu"]) if self.stats["cpu"] else 0
         
+        # GPU Stats
+        avg_gpu_load = statistics.mean(self.stats["gpu_load"]) if self.stats.get("gpu_load") else 0
+        avg_gpu_temp = statistics.mean(self.stats["gpu_temp"]) if self.stats.get("gpu_temp") else 0
+
         duration = self.end_time - self.start_time
         if duration <= 0: duration = 0.001
         
-        # Tokens per second (Lower is better for attack -> High Latency)
         tps = self.token_count / duration
         
-        # We want to MAXIMIZE: Duration and Temperature
-        # We want to MINIMIZE: Tokens per Second
-        
-        # Score = (AvgTemp * 0.5) + (Duration * 10)
-        # Prioritize making it taking a LONG time (Sponge)
-        score = (avg_temp * 0.5) + (duration * 20)
-        
-        return score, max_temp, tps, avg_cpu, duration
+        # Determine if GPU was used
+        is_gpu = False
+        try:
+            if torch.cuda.is_available() or avg_gpu_load > 10:
+                is_gpu = True
+        except:
+            pass
 
-def cooldown(target_temp=45, max_wait=30):
+        if is_gpu:
+            # GPU Scoring Strategy
+            latency_factor = 0
+            if tps > 0:
+                latency_factor = 100 / tps
+            
+            # Weighted sum
+            score = (avg_gpu_load * 1.0) + \
+                    (avg_gpu_temp * 1.0) + \
+                    (self.token_count * 0.1) + \
+                    (latency_factor * 1.0)
+        else:
+            # CPU Fallback
+            score = (avg_temp * 0.5) + (duration * 20)
+        
+        return score, max_temp, tps, avg_cpu, avg_gpu_load, duration
+
+def cooldown(target_temp=60, max_wait=10):
     """Wait for CPU to cool down to ensure fair testing."""
-    print(f"  ❄️ Cooling down (target < {target_temp}°C)...", end="", flush=True)
+    print(f"  Cooling down (target < {target_temp}C)...", end="", flush=True)
     temp_monitor = SystemMonitor()
     
     for _ in range(max_wait):
         current_temp = temp_monitor._get_temp()
         if current_temp < target_temp:
-            print(f" Done ({current_temp}°C)")
+            print(f" Done ({current_temp}C)")
             return
         time.sleep(1)
         print(".", end="", flush=True)
-    print(f" Timeout ({current_temp}°C)")
+    print(f" Timeout ({current_temp}C)")
 
 # --- Genetic Algorithm ---
 
@@ -204,7 +263,7 @@ def crossover(p1, p2, tokenizer=None):
 def evaluate_population(population, model, tokenizer, device, progress_callback=None):
     scores = []
     
-    print(f"\n🧪 Evaluating {len(population)} prompts...")
+    print(f"\nEvaluating {len(population)} prompts...")
     if progress_callback:
         progress_callback({"status": "eval", "message": f"Evaluating {len(population)} prompts..."})
     
@@ -221,8 +280,8 @@ def evaluate_population(population, model, tokenizer, device, progress_callback=
     for i, prompt in enumerate(population):
         # Cool down system before measurement to ensure fairness
         if progress_callback:
-            progress_callback({"status": "eval", "message": f"  ❄️ Cooling down before prompt {i+1}/{len(population)}..."})
-        cooldown(target_temp=50, max_wait=30)
+            progress_callback({"status": "eval", "message": f"  Cooling down before prompt {i+1}/{len(population)}..."})
+        cooldown(target_temp=65, max_wait=5)
         
         print(f"  [{i+1}/{len(population)}] Testing: '{prompt[:30]}...'")
         if progress_callback:
@@ -258,29 +317,39 @@ def evaluate_population(population, model, tokenizer, device, progress_callback=
         finally:
             monitor.stop(token_count=generated_tokens)
         
-        score, peak_temp, tps, avg_cpu, duration = monitor.get_score()
+        score, peak_temp, tps, avg_cpu, avg_gpu, duration = monitor.get_score()
+        
+        # Log appropriate load metric
+        load_msg = f"CPU: {avg_cpu:.1f}%"
+        if avg_gpu > 0:
+            load_msg = f"GPU: {avg_gpu:.1f}%"
+            
         scores.append({
             "prompt": prompt,
             "score": score,
             "peak_temp": peak_temp,
             "tps": tps,
             "avg_cpu": avg_cpu,
+            "avg_gpu": avg_gpu,
             "duration": duration,
             "input_tokens": input_len,
             "output_tokens": generated_tokens,
             "output": generated_text
         })
-        print(f"    --> Score: {score:.2f} | Peak Temp: {peak_temp}°C | TPS: {tps:.2f}")
+        print(f"    --> Score: {score:.2f} | Temp: {peak_temp}C | {load_msg} | TPS: {tps:.2f}")
         if progress_callback:
-            progress_callback({"status": "eval", "message": f"    --> Score: {score:.2f} | Peak Temp: {peak_temp}°C | TPS: {tps:.2f}"})
+            progress_callback({
+                "status": "eval", 
+                "message": f"    --> Score: {score:.2f} | Temp: {peak_temp}C | {load_msg} | TPS: {tps:.2f}"
+            })
 
     # Sort by score (descending)
     scores.sort(key=lambda x: x["score"], reverse=True)
     return scores
 
 def run_sponge_attack(model_id, gens=5, pop=10, progress_callback=None):
-    if progress_callback: progress_callback({"status": "starting", "message": f"🔥 Starting Sponge Attack GA on {model_id}"})
-    print(f"🔥 Starting Sponge Attack GA on {model_id}")
+    if progress_callback: progress_callback({"status": "starting", "message": f"Starting Sponge Attack GA on {model_id}"})
+    print(f"Starting Sponge Attack GA on {model_id}")
     
     if progress_callback: progress_callback({"status": "loading", "message": "Loading model..."})
     print("Loading model...")
@@ -300,7 +369,7 @@ def run_sponge_attack(model_id, gens=5, pop=10, progress_callback=None):
 
     for gen in range(gens):
         if progress_callback: progress_callback({"status": "running", "message": f"Running Generation {gen + 1}/{gens}", "generation": gen + 1})
-        print(f"\n🧬 GENERATION {gen + 1}")
+        print(f"\nGENERATION {gen + 1}")
         print("="*40)
         
         scored_pop = evaluate_population(population, model, tokenizer, device, progress_callback=progress_callback)
@@ -320,14 +389,15 @@ def run_sponge_attack(model_id, gens=5, pop=10, progress_callback=None):
                 "best_prompt": best_of_gen["prompt"],
                 "best_output": best_of_gen["output"],
                 "best_avg_cpu": best_of_gen.get("avg_cpu", 0),
+                "best_avg_gpu": best_of_gen.get("avg_gpu", 0),
                 "best_duration": best_of_gen.get("duration", 0),
                 "best_input_tokens": best_of_gen.get("input_tokens", 0),
                 "best_output_tokens": best_of_gen.get("output_tokens", 0)
             })
 
-        print(f"\n🏆 Generation {gen+1} Winner:")
+        print(f"\nGeneration {gen+1} Winner:")
         print(f"   Prompt: '{best_of_gen['prompt']}'")
-        print(f"   Score: {best_of_gen['score']:.2f} | Peak Temp: {best_of_gen['peak_temp']}°C")
+        print(f"   Score: {best_of_gen['score']:.2f} | Peak Temp: {best_of_gen['peak_temp']}C")
         
         # Write to log file
         with open("sponge_log.txt", "a") as f:

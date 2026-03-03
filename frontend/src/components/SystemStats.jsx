@@ -218,15 +218,28 @@ const SystemStats = () => {
         </div>
         {stats.temperatures.error ? (
           <p className="temp-error">Could not read temperatures: {stats.temperatures.error}</p>
-        ) : (Object.keys(stats.temperatures).length === 0 ? (
+        ) : (Object.keys(stats.temperatures).filter(k => !k.startsWith('_')).length === 0 ? (
           <p className="temp-empty">No sensors detected.</p>
         ) : null)}
 
+        {stats.temperatures._hint && (
+          <p className="temp-hint">{stats.temperatures._hint}</p>
+        )}
+
+        {stats.temperatures._lhm_error && (
+          <p className="temp-hint">LHM: {stats.temperatures._lhm_error}</p>
+        )}
+
         <div className="temp-sensors">
           {Object.entries(stats.temperatures).map(([sensorName, readings]) => (
-            Array.isArray(readings) && readings.length > 0 && (
+            Array.isArray(readings) && readings.length > 0 && !sensorName.startsWith('_') && (
               <div key={sensorName} className="temp-sensor-group">
-                <span className="temp-sensor-name">{sensorName}</span>
+                <span className="temp-sensor-name">
+                  {sensorName.replace(/_/g, ' ')}
+                  {readings[0]?.source && (
+                    <span className="temp-source-badge">{readings[0].source}</span>
+                  )}
+                </span>
                 <div className="temp-readings">
                   {readings.map((reading, idx) => (
                     <div key={idx} className="temp-reading">
@@ -234,11 +247,18 @@ const SystemStats = () => {
                       <span
                         className="temp-value"
                         style={{
-                          color: reading.current > 75 ? 'var(--accent-danger)' : 'var(--text-primary)',
+                          color: typeof reading.current === 'number' && reading.current > 75
+                            ? 'var(--accent-danger)'
+                            : 'var(--text-primary)',
                         }}
                       >
-                        {reading.current}°C
+                        {typeof reading.current === 'number'
+                          ? `${reading.current}${reading.unit || '°C'}`
+                          : reading.current}
                       </span>
+                      {reading.high != null && (
+                        <span className="temp-threshold">Max: {reading.high}{reading.unit || '°C'}</span>
+                      )}
                     </div>
                   ))}
                 </div>

@@ -54,11 +54,18 @@ def sponge_attack_worker(model_id: str, gens: int, pop: int):
                 "prompt": data.get("best_prompt"),
                 "output": data.get("best_output"),
                 "avg_cpu": data.get("best_avg_cpu", 0),
+                "avg_gpu": data.get("best_avg_gpu", 0),
                 "duration": data.get("best_duration", 0),
                 "input_tokens": data.get("best_input_tokens", 0),
                 "output_tokens": data.get("best_output_tokens", 0)
             }
-            attack_state["logs"].append(f"Gen {data.get('generation')}: Best Score {data.get('best_score'):.2f} (Temp: {data.get('best_temp')}C)")
+            # Log best of gen
+            gen_log = f"Gen {data.get('generation')}: Best Score {data.get('best_score'):.2f} (Temp: {data.get('best_temp')}C)"
+            if data.get("best_avg_gpu", 0) > 0:
+                gen_log += f" [GPU: {data.get('best_avg_gpu'):.1f}%]"
+            elif data.get("best_avg_cpu", 0) > 0:
+                gen_log += f" [CPU: {data.get('best_avg_cpu'):.1f}%]"
+            attack_state["logs"].append(gen_log)
         elif data.get("status") == "complete":
             attack_state["status"] = "complete"
             attack_state["is_running"] = False
@@ -148,7 +155,7 @@ def get_system_stats():
         "temperatures": {}
     }
 
-    # Helper function to get temperatures
+    # Collect temperatures from all available sources
     try:
         if platform.system() == "Linux":
             temps = psutil.sensors_temperatures()
@@ -165,21 +172,48 @@ def get_system_stats():
                             "critical": entry.critical
                         })
         elif platform.system() == "Windows":
-            import wmi
-            w = wmi.WMI(namespace="root\\wmi")
-            zones = w.MSAcpi_ThermalZoneTemperature()
-            if not zones:
-                stats["temperatures"]["error"] = "No thermal zones found"
-            else:
-                stats["temperatures"]["thermal_zones"] = []
-                for zone in zones:
-                    celsius = (zone.CurrentTemperature / 10) - 273.15
-                    stats["temperatures"]["thermal_zones"].append({
-                        "label": zone.InstanceName,
-                        "current": round(celsius, 2),
-                        "high": None,
-                        "critical": None
-                    })
+            found_any = False
+
+            # --- Primary: LibreHardwareMonitorLib via .NET ---
+            try:
+                from hardware_monitor import get_all_sensors
+                sensor_data = get_all_sensors()
+
+                for group_name, readings in sensor_data.items():
+                    if readings:
+                        stats["temperatures"][group_name] = readings
+                        found_any = True
+            except Exception as lhm_err:
+                stats["temperatures"]["_lhm_error"] = str(lhm_err)
+
+            # --- Fallback: ACPI Thermal Zones (no admin needed) ---
+            if not found_any:
+                try:
+                    import wmi
+                    import pythoncom
+                    pythoncom.CoInitialize()
+                    w = wmi.WMI(namespace="root\\cimv2")
+                    zones = w.Win32_PerfFormattedData_Counters_ThermalZoneInformation()
+                    if zones:
+                        stats["temperatures"]["acpi_thermal_zones"] = []
+                        for zone in zones:
+                            celsius = float(zone.Temperature) - 273.15
+                            stats["temperatures"]["acpi_thermal_zones"].append({
+                                "label": zone.Name,
+                                "current": round(celsius, 2),
+                                "high": None,
+                                "critical": None,
+                                "source": "ACPI"
+                            })
+                            found_any = True
+                except Exception:
+                    pass
+
+            if not found_any:
+                stats["temperatures"]["error"] = (
+                    "No sensors found. Make sure LibreHardwareMonitorLib.dll "
+                    "is in the backend/lib/ folder and pythonnet is installed."
+                )
 
     except Exception as e:
         stats["temperatures"]["error"] = str(e)
