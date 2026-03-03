@@ -1,80 +1,74 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
+
 :root {
-  --bg-primary: #0a0a0a;
-  --bg-secondary: #111111;
-  --bg-card: #171717;
-  --bg-elevated: #1c1c1c;
-  --bg-input: #1a1a1a;
-  --border-default: #262626;
-  --border-subtle: #1f1f1f;
-  --text-primary: #fafafa;
-  --text-secondary: #a1a1aa;
-  --text-muted: #71717a;
-  --accent-primary: #3b82f6;
-  --accent-success: #22c55e;
-  --accent-warning: #f59e0b;
-  --accent-danger: #ef4444;
-  --accent-info: #06b6d4;
-  --radius-sm: 6px;
-  --radius-md: 10px;
-  --radius-lg: 14px;
-  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  --font-mono: 'JetBrains Mono', 'Consolas', 'Monaco', monospace;
+  --black:     #0a0a0a;
+  --grey-900:  #111111;
+  --grey-850:  #161616;
+  --grey-800:  #1c1c1c;
+  --grey-750:  #222222;
+  --grey-700:  #2a2a2a;
+  --grey-600:  #3a3a3a;
+  --grey-400:  #666666;
+  --grey-300:  #888888;
+  --grey-100:  #cccccc;
+  --white:     #f0f0f0;
+
+  --amber:     #f0900a;
+  --amber-hot: #ff6b00;
+  --amber-dim: #3d2500;
+  --green:     #4dbd74;
+  --red:       #e05252;
+  --yellow:    #d4aa3b;
+
+  --bg-primary:   var(--black);
+  --bg-card:      var(--grey-900);
+  --bg-elevated:  var(--grey-850);
+  --bg-input:     var(--grey-800);
+  --border:       var(--grey-750);
+  --border-mid:   var(--grey-700);
+
+  --text-primary:   var(--white);
+  --text-secondary: var(--grey-300);
+  --text-muted:     var(--grey-400);
+
+  --accent-primary: var(--amber);
+  --accent-success: var(--green);
+  --accent-warning: var(--yellow);
+  --accent-danger:  var(--red);
+  --accent-info:    var(--amber);
+
+  --font-sans: 'IBM Plex Sans', sans-serif;
+  --font-mono: 'IBM Plex Mono', monospace;
+
+  --radius-sm: 3px;
+  --radius-md: 6px;
 }
 
-* {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
-}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { font-size: 14px; }
 
 body {
   font-family: var(--font-sans);
-  background-color: var(--bg-primary);
+  background: var(--black);
   color: var(--text-primary);
   -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
   line-height: 1.5;
+  min-height: 100vh;
 }
 
-h1, h2, h3, h4, h5, h6 {
-  margin: 0;
-  color: var(--text-primary);
+h1,h2,h3,h4,h5,h6 {
+  font-family: var(--font-sans);
   font-weight: 600;
+  color: var(--text-primary);
 }
 
-a {
-  text-decoration: none;
-  color: inherit;
-}
+button { cursor: pointer; font-family: var(--font-sans); border: none; }
+input, textarea, select { font-family: var(--font-mono); }
+a { text-decoration: none; color: inherit; }
+ul { list-style: none; }
 
-ul {
-  list-style: none;
-  padding: 0;
-}
-
-button {
-  cursor: pointer;
-  font-family: var(--font-sans);
-}
-
-input, textarea {
-  font-family: var(--font-sans);
-}
-
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-
-::-webkit-scrollbar-track {
-  background: var(--bg-secondary);
-}
-
-::-webkit-scrollbar-thumb {
-  background: var(--border-default);
-  border-radius: 3px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: var(--text-muted);
-}
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: var(--grey-900); }
+::-webkit-scrollbar-thumb { background: var(--grey-700); }
+::-webkit-scrollbar-thumb:hover { background: var(--grey-600); }

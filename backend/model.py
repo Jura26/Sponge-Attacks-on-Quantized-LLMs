@@ -5,9 +5,9 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 import logging
 
 # Suppress transformers progress bars and verbose logging
-os.environ["TRANSFORMERS_VERBOSITY"] = "error"
-os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
-os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+# os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+# os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
+# os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 
 # Configure simple logging
 logging.basicConfig(level=logging.INFO, format='%(message)s')
@@ -27,31 +27,42 @@ def load_model_and_tokenizer(model_id: str):
         else:
             logger.info(f"🎮 GPU: {gpu_name} (CUDA {torch.version.cuda})")
 
-    logger.info(f"🔄 Loading tokenizer for {model_id}...")
+    logger.info(f"🔄 Checking model {model_id}...")
+    
+    # Check if model is cached locally first to avoid network checks if possible
     try:
+        tokenizer = AutoTokenizer.from_pretrained(model_id, local_files_only=True)
+        # Check if model is cached
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            dtype=dtype,
+            device_map="auto" if device == "cuda" else None,
+            local_files_only=True
+        )
+        logger.info(f"✅ Found {model_id} in local cache. Loading...")
+    except Exception:
+        # If not cached, download properly
+        logger.info(f"⬇️ Model {model_id} not found locally. Downloading...")
         tokenizer = AutoTokenizer.from_pretrained(model_id)
-        if getattr(tokenizer, "pad_token_id", None) is None:
-            tokenizer.pad_token_id = tokenizer.eos_token_id
-        logger.info(f"✅ Tokenizer loaded.")
-
-        logger.info(f"🔄 Loading model {model_id} on {device} ({dtype})...")
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
             dtype=dtype,
             device_map="auto" if device == "cuda" else None,
         )
-        if device == "cuda":
-            logger.info(f"✅ Model loaded on GPU ({torch.cuda.get_device_name(0)}).")
-        else:
-            # If not using device_map="auto" (CPU), explicitly move to device not really needed for CPU but good practice
-            model.to(device)
-            logger.info(f"✅ Model loaded on CPU.")
-            
-        model.eval()
-        return tokenizer, model, device
-    except Exception as e:
-        logger.error(f"❌ Error loading model: {e}")
-        raise
+        logger.info(f"✅ Download complete and model loaded.")
+
+    if getattr(tokenizer, "pad_token_id", None) is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+    
+    if device == "cuda":
+        logger.info(f"✅ Model ready on GPU.")
+    else:
+        # If not using device_map="auto" (CPU), explicitly move to device
+        model.to(device)
+        logger.info(f"✅ Model ready on CPU.")
+        
+    model.eval()
+    return tokenizer, model, device
 
 def generate_text(model_id: str, prompt: str, max_new_tokens: int = -1):
     """

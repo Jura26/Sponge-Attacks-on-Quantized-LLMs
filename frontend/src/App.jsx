@@ -9,8 +9,14 @@ function App() {
     <div className="app">
       <Header />
       <main className="main-content">
-        <SystemStats />
-        <SpongeAttack />
+        <div className="section-block">
+          <div className="section-label">System Overview</div>
+          <SystemStats />
+        </div>
+        <div className="section-block">
+          <div className="section-label">Sponge Attack Console</div>
+          <SpongeAttack />
+        </div>
       </main>
     </div>
   );

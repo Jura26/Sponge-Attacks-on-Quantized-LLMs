@@ -28,9 +28,10 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'backend'))
 try:
     from model import load_model_and_tokenizer
     import torch
-except ImportError:
-    print("❌ Could not import backend.model. Make sure you are running this from the project root.")
-    sys.exit(1)
+except ImportError as e:
+    print(f"❌ Import Error: {e}")
+    print("Hint: Check if 'backend.model' or 'torch' imports are failing.")
+    # sys.exit(1) # Don't exit immediately so we can see more info if running via uvicorn
 
 # --- Configuration ---
 POPULATION_SIZE = 10
@@ -43,7 +44,8 @@ MIN_NEW_TOKENS = 256
 MAX_NEW_TOKENS = 1024  # Upper limit for token generation
 
 class SystemMonitor:
-    def __init__(self):
+    def __init__(self, device="cpu"):
+        self.device = device
         self.running = False
         self.stats = {
             "temps": [],
@@ -58,7 +60,7 @@ class SystemMonitor:
         self.thread = None
 
     def _get_temp(self):
-        """Get the highest current temperature from any sensor."""
+        """Get the relevant temperature based on device (CPU or GPU)."""
         max_temp = 0
         try:
             if platform.system() == "Linux":
@@ -70,25 +72,37 @@ class SystemMonitor:
                         if current > max_temp:
                             max_temp = current
             elif platform.system() == "Windows":
-                # Primary: LibreHardwareMonitor .NET library
-                try:
-                    from hardware_monitor import get_max_temperature
-                    t = get_max_temperature()
-                    if t > max_temp:
-                        max_temp = t
-                except Exception:
-                    # Fallback: ACPI thermal zones
+                if self.device == "cuda":
+                    # GPU temperature
                     try:
-                        import wmi
-                        import pythoncom
-                        pythoncom.CoInitialize()
-                        w = wmi.WMI(namespace="root\\cimv2")
-                        for zone in w.Win32_PerfFormattedData_Counters_ThermalZoneInformation():
-                            celsius = float(zone.Temperature) - 273.15
-                            if celsius > max_temp:
-                                max_temp = celsius
+                        from hardware_monitor import get_gpu_stats
+                        g_temp, _ = get_gpu_stats()
+                        if g_temp > max_temp:
+                            max_temp = g_temp
                     except Exception:
                         pass
+                else:
+                    # CPU temperature
+                    try:
+                        from hardware_monitor import get_cpu_stats
+                        c_temp, _ = get_cpu_stats()
+                        if c_temp > max_temp:
+                            max_temp = c_temp
+                    except Exception:
+                        pass
+                    # Fallback: ACPI thermal zones
+                    if max_temp == 0:
+                        try:
+                            import wmi
+                            import pythoncom
+                            pythoncom.CoInitialize()
+                            w = wmi.WMI(namespace="root\\cimv2")
+                            for zone in w.Win32_PerfFormattedData_Counters_ThermalZoneInformation():
+                                celsius = float(zone.Temperature) - 273.15
+                                if celsius > max_temp:
+                                    max_temp = celsius
+                        except Exception:
+                            pass
         except:
             pass
         return max_temp
@@ -98,8 +112,8 @@ class SystemMonitor:
             self.stats["temps"].append(self._get_temp())
             self.stats["cpu"].append(psutil.cpu_percent(interval=None))
             
-            # Fetch GPU stats on Windows
-            if platform.system() == "Windows":
+            # Only fetch GPU stats when model is actually on CUDA
+            if self.device == "cuda" and platform.system() == "Windows":
                 try:
                     from hardware_monitor import get_gpu_stats
                     g_temp, g_load = get_gpu_stats()
@@ -127,13 +141,14 @@ class SystemMonitor:
         
     def get_score(self):
         """Calculate score based on Latency (Time) and Energy (Temp/Load)."""
-        if not self.stats["temps"]: return 0, 0, 0, 0, 0, 0
+        if not self.stats["temps"] and not self.stats["cpu"]:
+            return 0, 0, 0, 0, 0, 0
         
-        avg_temp = statistics.mean(self.stats["temps"])
-        max_temp = max(self.stats["temps"])
+        avg_temp = statistics.mean(self.stats["temps"]) if self.stats["temps"] else 0
+        max_temp = max(self.stats["temps"]) if self.stats["temps"] else 0
         avg_cpu = statistics.mean(self.stats["cpu"]) if self.stats["cpu"] else 0
         
-        # GPU Stats
+        # GPU Stats (only populated when device is cuda)
         avg_gpu_load = statistics.mean(self.stats["gpu_load"]) if self.stats.get("gpu_load") else 0
         avg_gpu_temp = statistics.mean(self.stats["gpu_temp"]) if self.stats.get("gpu_temp") else 0
 
@@ -142,13 +157,8 @@ class SystemMonitor:
         
         tps = self.token_count / duration
         
-        # Determine if GPU was used
-        is_gpu = False
-        try:
-            if torch.cuda.is_available() or avg_gpu_load > 10:
-                is_gpu = True
-        except:
-            pass
+        # Use device to determine scoring strategy (not torch.cuda.is_available())
+        is_gpu = (self.device == "cuda")
 
         if is_gpu:
             # GPU Scoring Strategy
@@ -159,21 +169,34 @@ class SystemMonitor:
             # Weighted sum
             score = (avg_gpu_load * 1.0) + \
                     (avg_gpu_temp * 1.0) + \
-                    (self.token_count * 0.1) + \
-                    (latency_factor * 1.0)
+                    (duration * 10)
         else:
-            # CPU Fallback
-            score = (avg_temp * 0.5) + (duration * 20)
+            # CPU Scoring - Focus on Duration (Latency) & CPU Temp
+            # If temp is 0 (sensor unavailable), fallback to just Duration
+            temp_score = avg_temp if avg_temp > 0 else 0
+            
+            # The Goal of a Sponge Attack: MAXIMIZE Latency (Duration) + Energy (Temp)
+            # Duration is the most reliable metric if sensors fail.
+            score = (temp_score * 0.5) + (duration * 20)
         
         return score, max_temp, tps, avg_cpu, avg_gpu_load, duration
 
-def cooldown(target_temp=60, max_wait=10):
-    """Wait for CPU to cool down to ensure fair testing."""
+def cooldown(target_temp=60, max_wait=10, device="cpu"):
+    """Wait for hardware to cool down to ensure fair testing."""
     print(f"  Cooling down (target < {target_temp}C)...", end="", flush=True)
-    temp_monitor = SystemMonitor()
+    temp_monitor = SystemMonitor(device=device)
     
+    # Check if sensors are working at all
+    initial_temp = temp_monitor._get_temp()
+    if initial_temp == 0:
+        print(" Skipped (temp sensor unavailable)")
+        return
+
     for _ in range(max_wait):
         current_temp = temp_monitor._get_temp()
+        if current_temp == 0:
+            print(" Skipped (temp sensor lost)")
+            return
         if current_temp < target_temp:
             print(f" Done ({current_temp}C)")
             return
@@ -281,13 +304,13 @@ def evaluate_population(population, model, tokenizer, device, progress_callback=
         # Cool down system before measurement to ensure fairness
         if progress_callback:
             progress_callback({"status": "eval", "message": f"  Cooling down before prompt {i+1}/{len(population)}..."})
-        cooldown(target_temp=65, max_wait=5)
+        cooldown(target_temp=65, max_wait=5, device=device)
         
         print(f"  [{i+1}/{len(population)}] Testing: '{prompt[:30]}...'")
         if progress_callback:
             progress_callback({"status": "eval", "message": f"  [{i+1}/{len(population)}] Testing: '{prompt[:30]}...'"})
         
-        monitor = SystemMonitor()
+        monitor = SystemMonitor(device=device)
         monitor.start()
 
         generated_tokens = 0
@@ -319,10 +342,11 @@ def evaluate_population(population, model, tokenizer, device, progress_callback=
         
         score, peak_temp, tps, avg_cpu, avg_gpu, duration = monitor.get_score()
         
-        # Log appropriate load metric
-        load_msg = f"CPU: {avg_cpu:.1f}%"
-        if avg_gpu > 0:
+        # Log appropriate load metric based on actual device
+        if device == "cuda":
             load_msg = f"GPU: {avg_gpu:.1f}%"
+        else:
+            load_msg = f"CPU: {avg_cpu:.1f}%"
             
         scores.append({
             "prompt": prompt,
@@ -336,11 +360,12 @@ def evaluate_population(population, model, tokenizer, device, progress_callback=
             "output_tokens": generated_tokens,
             "output": generated_text
         })
-        print(f"    --> Score: {score:.2f} | Temp: {peak_temp}C | {load_msg} | TPS: {tps:.2f}")
+        temp_str = f"{peak_temp}C" if peak_temp > 0 else "N/A"
+        print(f"    --> Score: {score:.2f} | Temp: {temp_str} | {load_msg} | TPS: {tps:.2f}")
         if progress_callback:
             progress_callback({
                 "status": "eval", 
-                "message": f"    --> Score: {score:.2f} | Temp: {peak_temp}C | {load_msg} | TPS: {tps:.2f}"
+                "message": f"    --> Score: {score:.2f} | Temp: {temp_str} | {load_msg} | TPS: {tps:.2f}"
             })
 
     # Sort by score (descending)
@@ -399,10 +424,6 @@ def run_sponge_attack(model_id, gens=5, pop=10, progress_callback=None):
         print(f"   Prompt: '{best_of_gen['prompt']}'")
         print(f"   Score: {best_of_gen['score']:.2f} | Peak Temp: {best_of_gen['peak_temp']}C")
         
-        # Write to log file
-        with open("sponge_log.txt", "a") as f:
-            f.write(f"Gen {gen+1}: {best_of_gen['score']:.2f} | {best_of_gen['peak_temp']}C | {best_of_gen['prompt']}\n")
-            
         # Selection (Keep Top 50%)
         top_half = scored_pop[:len(population)//2]
         parents = [p["prompt"] for p in top_half]

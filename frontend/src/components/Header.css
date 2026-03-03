@@ -1,67 +1,101 @@
 .header {
-  border-bottom: 1px solid var(--border-default);
-  background-color: var(--bg-secondary);
+  background: var(--grey-900);
+  border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
-  z-index: 50;
-  backdrop-filter: blur(12px);
+  z-index: 100;
 }
 
 .header-inner {
-  max-width: 1280px;
+  max-width: 1320px;
   margin: 0 auto;
-  padding: 0 24px;
-  height: 56px;
+  padding: 0 28px;
+  height: 52px;
   display: flex;
   align-items: center;
   justify-content: space-between;
 }
 
-.header-brand {
+.header-left {
   display: flex;
   align-items: center;
   gap: 10px;
-  color: var(--text-primary);
+}
+
+.header-logo {
+  color: var(--amber);
+  display: flex;
+  align-items: center;
+  line-height: 1;
 }
 
 .header-title {
-  font-weight: 600;
-  font-size: 15px;
-  letter-spacing: -0.01em;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 0.15em;
+  color: var(--text-primary);
 }
 
-.header-version {
-  font-size: 11px;
+.header-sep {
+  color: var(--grey-600);
   font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+.header-sub {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
   color: var(--text-muted);
-  background-color: var(--bg-elevated);
-  padding: 2px 8px;
-  border-radius: 9999px;
-  border: 1px solid var(--border-default);
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+
+.header-meta {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  letter-spacing: 0.06em;
+}
+
+.header-clock {
+  color: var(--grey-300);
+  font-weight: 500;
 }
 
 .header-status {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.15em;
+  color: var(--green);
+  padding: 4px 10px;
+  border: 1px solid rgba(77, 189, 116, 0.25);
+  border-radius: var(--radius-sm);
+  background: rgba(77, 189, 116, 0.06);
 }
 
-.status-dot {
-  width: 8px;
-  height: 8px;
+.status-pip {
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
-  background-color: var(--accent-success);
-  box-shadow: 0 0 8px rgba(34, 197, 94, 0.5);
-  animation: pulse 2s ease-in-out infinite;
+  background: var(--green);
+  box-shadow: 0 0 6px var(--green);
+  animation: pip 2.4s ease-in-out infinite;
 }
 
-.status-text {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-secondary);
-}
-
-@keyframes pulse {
+@keyframes pip {
   0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
+  50% { opacity: 0.2; }
 }

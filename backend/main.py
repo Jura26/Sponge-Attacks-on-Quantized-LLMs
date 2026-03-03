@@ -63,8 +63,8 @@ def sponge_attack_worker(model_id: str, gens: int, pop: int):
             gen_log = f"Gen {data.get('generation')}: Best Score {data.get('best_score'):.2f} (Temp: {data.get('best_temp')}C)"
             if data.get("best_avg_gpu", 0) > 0:
                 gen_log += f" [GPU: {data.get('best_avg_gpu'):.1f}%]"
-            elif data.get("best_avg_cpu", 0) > 0:
-                gen_log += f" [CPU: {data.get('best_avg_cpu'):.1f}%]"
+            else:
+                gen_log += f" [CPU: {data.get('best_avg_cpu', 0):.1f}%]"
             attack_state["logs"].append(gen_log)
         elif data.get("status") == "complete":
             attack_state["status"] = "complete"
@@ -178,7 +178,7 @@ def get_system_stats():
             try:
                 from hardware_monitor import get_all_sensors
                 sensor_data = get_all_sensors()
-
+                
                 for group_name, readings in sensor_data.items():
                     if readings:
                         stats["temperatures"][group_name] = readings

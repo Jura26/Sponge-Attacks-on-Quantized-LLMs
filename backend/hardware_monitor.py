@@ -268,6 +268,47 @@ def get_max_temperature():
     return max_temp
 
 
+def get_cpu_stats():
+    """Return current (max_cpu_temp, max_cpu_load) from CPU hardware only."""
+    import math
+
+    computer = _init_computer()
+    _update_hardware(computer)
+
+    max_temp = 0.0
+    max_load = 0.0
+
+    for hw in computer.Hardware:
+        # CPU Hardware Type: 2
+        if int(hw.HardwareType) != 2:
+            continue
+        for sensor in hw.Sensors:
+            st = int(sensor.SensorType)
+            if sensor.Value is None:
+                continue
+            val = float(sensor.Value)
+            if math.isnan(val):
+                continue
+            if st == 4 and val > max_temp:  # Temperature
+                max_temp = val
+            if st == 5 and val > max_load:  # Load
+                max_load = val
+        for sub in hw.SubHardware:
+            for sensor in sub.Sensors:
+                st = int(sensor.SensorType)
+                if sensor.Value is None:
+                    continue
+                val = float(sensor.Value)
+                if math.isnan(val):
+                    continue
+                if st == 4 and val > max_temp:
+                    max_temp = val
+                if st == 5 and val > max_load:
+                    max_load = val
+
+    return max_temp, max_load
+
+
 def get_gpu_stats():
     """Return current max GPU temperature and max GPU core load."""
     import math
