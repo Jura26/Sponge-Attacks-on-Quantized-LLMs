@@ -172,11 +172,22 @@ def _make_comparison_callback(target_logs_key: str):
 
 
 def comparison_worker(model_id: str, gens: int, pop: int, seed: int):
-    """Run the sponge attack twice: regular (fp16), then quantized (bnb 4-bit)."""
+    """Run the sponge attack twice: regular (fp16), then quantized (int8)."""
     global comparison_state
     import torch
 
     try:
+        # Free memory before first run
+        print("🧹 [main.py] Verifying VRAM is clear before taking baseline...")
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            if hasattr(torch.cuda, 'ipc_collect'):
+                torch.cuda.ipc_collect()
+            allocated = torch.cuda.memory_allocated() / 1024**3
+            print(f"🧹 [main.py] VRAM before baseline: {allocated:.2f} GB")
+
         # ── Phase 1: Regular (fp16) ──
         comparison_state["phase"] = "regular"
         comparison_state["regular_logs"].append(f"═══ Phase 1/2: Regular model ({model_id}) ═══")

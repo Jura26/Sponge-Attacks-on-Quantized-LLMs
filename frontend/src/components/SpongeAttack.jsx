@@ -383,7 +383,7 @@ const SpongeAttack = () => {
           {/* Side-by-side results */}
           <div className="compare-grid">
             <ResultCard title="Regular" result={regularResult} tag={regularResult?.quant_label ?? 'fp16'} />
-            <ResultCard title="Quantized (4-bit)" result={quantizedResult} tag={quantizedResult?.quant_label ?? 'int4'} />
+            <ResultCard title="Quantized (int8)" result={quantizedResult} tag={quantizedResult?.quant_label ?? 'int8'} />
           </div>
         </>
       )}

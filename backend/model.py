@@ -1,7 +1,8 @@
 import argparse
 import os
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, QuantoConfig
+import torch.nn as nn
+from transformers import AutoTokenizer, AutoModelForCausalLM
 import logging
 
 # Configure simple logging
@@ -62,6 +63,58 @@ def cleanup_model(model, tokenizer=None):
             torch.cuda.ipc_collect()
         allocated_after = torch.cuda.memory_allocated() / 1024**3
         logger.info(f"🧹 VRAM after cleanup: {allocated_after:.2f} GB allocated")
+
+
+# ── Pure-PyTorch int8 quantization (works on CUDA, ROCm, CPU) ──────────
+
+class _QuantizedLinear(nn.Module):
+    """Drop-in nn.Linear replacement using int8 weights with per-channel scale."""
+
+    def __init__(self, weight_int8: torch.Tensor, bias: torch.Tensor | None, scale: torch.Tensor):
+        super().__init__()
+        self.register_buffer("weight_int8", weight_int8)   # (out, in) int8
+        self.register_buffer("scale", scale)                # (out, 1) same dtype as input
+        if bias is not None:
+            self.register_buffer("bias", bias)
+        else:
+            self.bias = None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Dequantize on-the-fly: float_weight = int8_weight * scale
+        weight = self.weight_int8.to(x.dtype) * self.scale.to(x.dtype)
+        return torch.nn.functional.linear(x, weight, self.bias)
+
+
+def _quantize_model_int8(model: nn.Module) -> nn.Module:
+    """Replace every nn.Linear in *model* with an int8-quantized version.
+
+    Uses per-output-channel symmetric quantization.  Only standard PyTorch
+    tensor ops are used, so this works on any backend (CUDA / ROCm / CPU).
+    """
+    replacements: list[tuple[nn.Module, str, _QuantizedLinear]] = []
+    for name, module in model.named_modules():
+        if not isinstance(module, nn.Linear):
+            continue
+        w = module.weight.data
+        scale = w.abs().amax(dim=1, keepdim=True) / 127.0
+        scale = scale.clamp(min=1e-8)
+        w_int8 = (w / scale).round().clamp(-128, 127).to(torch.int8)
+
+        qlinear = _QuantizedLinear(w_int8, module.bias.data if module.bias is not None else None, scale)
+        # Determine parent module so we can swap the layer in-place
+        if "." in name:
+            parent_name, attr = name.rsplit(".", 1)
+            parent = model.get_submodule(parent_name)
+        else:
+            parent, attr = model, name
+        replacements.append((parent, attr, qlinear))
+
+    for parent, attr, qlinear in replacements:
+        setattr(parent, attr, qlinear)
+
+    n = len(replacements)
+    logger.info(f"⚙️ Replaced {n} Linear layers with int8 quantized versions")
+    return model
 
 
 def _is_model_cached(model_id: str, hf_token=None) -> bool:
@@ -127,10 +180,7 @@ def load_model_and_tokenizer(model_id: str, quantize: bool = False):
         "token": hf_token,
     }
 
-    # ── quanto int4 quantization (works on CUDA, ROCm, CPU) ────────
-    if quantize:
-        logger.info("⚙️ Loading model with quanto int4 quantization")
-        load_kwargs["quantization_config"] = QuantoConfig(weights="int4")
+    # NOTE: quantization is applied *after* loading (see below)
 
     if _is_model_cached(model_id, hf_token):
         logger.info(f"✅ Found {model_id} in local cache.")
@@ -152,10 +202,12 @@ def load_model_and_tokenizer(model_id: str, quantize: bool = False):
     if device == "cpu":
         model.to(device)
 
-    # Determine quantization label
+    # ── Post-load int8 quantization (pure PyTorch, any backend) ────────
     if quantize:
-        quant_label = "quanto-int4"
-        logger.info(f"✅ Model ready — quanto int4 quantization.")
+        logger.info("⚙️ Applying int8 per-channel weight quantization...")
+        model = _quantize_model_int8(model)
+        quant_label = "int8"
+        logger.info(f"✅ Model ready — int8 quantized.")
     else:
         quant_label = "fp16" if device == "cuda" else "fp32"
         logger.info(f"✅ Model ready on {device.upper()} ({quant_label}).")
