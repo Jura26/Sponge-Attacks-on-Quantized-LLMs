@@ -98,21 +98,21 @@ const SpongeAttack = () => {
   const terminalRef = useRef(null);
   const compareTerminalRef = useRef(null);
 
-  // Models with optional pre-quantized GPTQ counterparts from HuggingFace
+  // Models — comparison runs the same model in fp16 vs bitsandbytes NF4 4-bit
   const models = [
-    { id: 'gpt2', label: 'GPT-2 Small (124M)', size: '~1 GB', quantizedId: null },
-    { id: 'gpt2-medium', label: 'GPT-2 Medium (355M)', size: '~1.5 GB', quantizedId: null },
-    { id: 'gpt2-large', label: 'GPT-2 Large (774M)', size: '~3–4 GB', quantizedId: null },
-    { id: 'gpt2-xl', label: 'GPT-2 XL (1.5B)', size: '~6–8 GB', quantizedId: null },
-    { id: 'facebook/opt-2.7b', label: 'OPT-2.7B', size: '~5 GB', quantizedId: 'TheBloke/opt-2.7b-GPTQ', quantizedLabel: 'OPT-2.7B GPTQ' },
-    { id: 'facebook/opt-6.7b', label: 'OPT-6.7B', size: '~13 GB', quantizedId: 'TheBloke/opt-6.7b-GPTQ', quantizedLabel: 'OPT-6.7B GPTQ' },
-    { id: 'facebook/opt-13b', label: 'OPT-13B', size: '~25 GB', quantizedId: 'TheBloke/opt-13b-GPTQ', quantizedLabel: 'OPT-13B GPTQ' },
-    { id: 'mistralai/Mistral-7B-v0.1', label: 'Mistral-7B', size: '~14 GB', quantizedId: 'TheBloke/Mistral-7B-v0.1-GPTQ', quantizedLabel: 'Mistral-7B GPTQ' },
-    { id: 'meta-llama/Llama-2-7b-hf', label: 'LLaMA 2-7B', size: '~14 GB', quantizedId: 'TheBloke/Llama-2-7B-GPTQ', quantizedLabel: 'LLaMA 2-7B GPTQ' },
+    { id: 'gpt2', label: 'GPT-2 Small (124M)', size: '~1 GB', canQuantize: true },
+    { id: 'gpt2-medium', label: 'GPT-2 Medium (355M)', size: '~1.5 GB', canQuantize: true },
+    { id: 'gpt2-large', label: 'GPT-2 Large (774M)', size: '~3–4 GB', canQuantize: true },
+    { id: 'gpt2-xl', label: 'GPT-2 XL (1.5B)', size: '~6–8 GB', canQuantize: true },
+    { id: 'facebook/opt-2.7b', label: 'OPT-2.7B', size: '~5 GB', canQuantize: true },
+    { id: 'facebook/opt-6.7b', label: 'OPT-6.7B', size: '~13 GB', canQuantize: true },
+    { id: 'facebook/opt-13b', label: 'OPT-13B', size: '~25 GB', canQuantize: true },
+    { id: 'mistralai/Mistral-7B-v0.1', label: 'Mistral-7B', size: '~14 GB', canQuantize: true },
+    { id: 'meta-llama/Llama-2-7b-hf', label: 'LLaMA 2-7B', size: '~14 GB', canQuantize: true },
   ];
 
   const selectedModelObj = models.find(m => m.id === selectedModel);
-  const hasQuantized = selectedModelObj?.quantizedId != null;
+  const hasQuantized = selectedModelObj?.canQuantize ?? false;
 
   // Auto-scroll terminals
   useEffect(() => {
@@ -177,7 +177,7 @@ const SpongeAttack = () => {
     if (!hasQuantized) return;
     try {
       const res = await fetch(
-        `http://localhost:8000/api/attack/compare?model_id=${encodeURIComponent(selectedModel)}&quantized_model_id=${encodeURIComponent(selectedModelObj.quantizedId)}&gens=${generations}&pop=${population}`,
+        `http://localhost:8000/api/attack/compare?model_id=${encodeURIComponent(selectedModel)}&gens=${generations}&pop=${population}`,
         { method: 'POST' }
       );
       if (res.ok) {
@@ -226,9 +226,9 @@ const SpongeAttack = () => {
           className={`attack-btn attack-btn-compare${isComparing ? ' attack-btn-running' : ''}`}
           onClick={startComparison}
           disabled={anyRunning || !hasQuantized}
-          title={hasQuantized ? `Compare ${selectedModelObj.label} vs ${selectedModelObj.quantizedLabel}` : 'No GPTQ variant available for this model'}
+          title={hasQuantized ? `Compare ${selectedModelObj.label}: FP16 vs 4-bit` : 'Quantized comparison not available'}
         >
-          {isComparing ? <><span className="btn-spinner" />Comparing...</> : 'Compare vs GPTQ'}
+          {isComparing ? <><span className="btn-spinner" />Comparing...</> : 'Compare FP16 vs 4-bit'}
         </button>
       </div>
 
@@ -331,7 +331,7 @@ const SpongeAttack = () => {
               <span className={`attack-status-indicator ${compareStatusClass}`} />
               <span className="attack-status-label">
                 {comparePhase === 'regular' && `PHASE 1/2 — ${selectedModelObj?.label || 'REGULAR'}`}
-                {comparePhase === 'quantized' && `PHASE 2/2 — ${selectedModelObj?.quantizedLabel || 'QUANTIZED'}`}
+                {comparePhase === 'quantized' && `PHASE 2/2 — ${selectedModelObj?.label || 'MODEL'} (4-bit)`}
                 {comparePhase === 'complete' && 'COMPARISON COMPLETE'}
                 {comparePhase === 'queued' && 'QUEUED'}
                 {comparePhase === 'error' && 'ERROR'}
@@ -383,7 +383,7 @@ const SpongeAttack = () => {
           {/* Side-by-side results */}
           <div className="compare-grid">
             <ResultCard title="Regular" result={regularResult} tag={regularResult?.quant_label ?? 'fp16'} />
-            <ResultCard title="Quantized (GPTQ)" result={quantizedResult} tag={quantizedResult?.quant_label ?? 'GPTQ'} />
+            <ResultCard title="Quantized (4-bit)" result={quantizedResult} tag={quantizedResult?.quant_label ?? 'int4'} />
           </div>
         </>
       )}

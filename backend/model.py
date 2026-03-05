@@ -1,36 +1,8 @@
 import argparse
 import os
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, QuantoConfig
 import logging
-
-# auto-gptq requires QuantizeConfig and FORMAT to be importable in the global
-# namespace when deserializing GPTQ model configs — import and inject them here.
-import builtins
-
-try:
-    from auto_gptq import AutoGPTQForCausalLM, BaseQuantizeConfig as QuantizeConfig  # noqa: F401
-except ImportError:
-    try:
-        from auto_gptq import QuantizeConfig  # noqa: F401
-    except ImportError:
-        try:
-            from transformers import GPTQConfig as QuantizeConfig  # noqa: F401
-        except ImportError:
-            pass
-
-try:
-    from auto_gptq.quantize import FORMAT  # noqa: F401
-except ImportError:
-    try:
-        from auto_gptq import FORMAT  # noqa: F401
-    except ImportError:
-        pass
-
-# Inject into builtins so pickle/deserialization can always find them
-for _name in ("QuantizeConfig", "FORMAT"):
-    if _name in dir() and not hasattr(builtins, _name):
-        setattr(builtins, _name, eval(_name))
 
 # Configure simple logging
 logging.basicConfig(level=logging.INFO, format='%(message)s')
@@ -115,12 +87,12 @@ def _is_model_cached(model_id: str, hf_token=None) -> bool:
     return False
 
 
-def load_model_and_tokenizer(model_id: str):
+def load_model_and_tokenizer(model_id: str, quantize: bool = False):
     """
     Load a HuggingFace causal-LM and its tokenizer.
 
-    Supports regular models AND pre-quantized models (GPTQ, AWQ, etc.).
-    Quantization method is auto-detected from the model's config.
+    Supports regular models and on-the-fly bitsandbytes NF4 quantization.
+    Pass quantize=True to load in 4-bit.
 
     Returns:
         (tokenizer, model, device, quant_label)
@@ -155,35 +127,10 @@ def load_model_and_tokenizer(model_id: str):
         "token": hf_token,
     }
 
-    # Detect ROCm and pre-configure GPTQ to avoid broken ExLlama kernels.
-    # ExLlama/ExLlamaV2 are NVIDIA-only CUDA kernels; on AMD/ROCm they silently
-    # fail and fall back to extremely slow pure-PyTorch dequantization.
-    is_rocm = getattr(torch.version, 'hip', None) is not None
-    if is_rocm:
-        try:
-            from transformers import AutoConfig
-            remote_config = AutoConfig.from_pretrained(
-                model_id, token=hf_token,
-                **({"local_files_only": True} if _is_model_cached(model_id, hf_token) else {})
-            )
-            qcfg = getattr(remote_config, "quantization_config", None)
-            if qcfg:
-                qdict = qcfg if isinstance(qcfg, dict) else qcfg.to_dict()
-                if qdict.get("quant_method") in ("gptq", "awq"):
-                    from transformers import GPTQConfig
-                    bits = qdict.get("bits", 4)
-                    group_size = qdict.get("group_size", 128)
-                    desc_act = qdict.get("desc_act", False)
-                    logger.info(f"⚙️ ROCm detected — disabling ExLlama kernels for GPTQ model")
-                    load_kwargs["quantization_config"] = GPTQConfig(
-                        bits=bits,
-                        group_size=group_size,
-                        desc_act=desc_act,
-                        disable_exllama=True,
-                        use_cuda_fp16=True,
-                    )
-        except Exception as e:
-            logger.warning(f"⚠️ Could not pre-configure GPTQ for ROCm: {e}")
+    # ── quanto int4 quantization (works on CUDA, ROCm, CPU) ────────
+    if quantize:
+        logger.info("⚙️ Loading model with quanto int4 quantization")
+        load_kwargs["quantization_config"] = QuantoConfig(weights="int4")
 
     if _is_model_cached(model_id, hf_token):
         logger.info(f"✅ Found {model_id} in local cache.")
@@ -205,17 +152,10 @@ def load_model_and_tokenizer(model_id: str):
     if device == "cpu":
         model.to(device)
 
-    # Auto-detect quantization from model config (GPTQ, AWQ, etc.)
-    quant_config = getattr(model.config, "quantization_config", None)
-    if quant_config:
-        if isinstance(quant_config, dict):
-            quant_method = quant_config.get("quant_method", "quantized")
-            bits = quant_config.get("bits", "?")
-        else:
-            quant_method = getattr(quant_config, "quant_method", "quantized")
-            bits = getattr(quant_config, "bits", "?")
-        quant_label = f"{quant_method}-{bits}bit"
-        logger.info(f"✅ Model ready — {quant_method} {bits}-bit quantization detected.")
+    # Determine quantization label
+    if quantize:
+        quant_label = "quanto-int4"
+        logger.info(f"✅ Model ready — quanto int4 quantization.")
     else:
         quant_label = "fp16" if device == "cuda" else "fp32"
         logger.info(f"✅ Model ready on {device.upper()} ({quant_label}).")

@@ -381,13 +381,14 @@ def evaluate_population(population, model, tokenizer, device, progress_callback=
     scores.sort(key=lambda x: x["score"], reverse=True)
     return scores
 
-def run_sponge_attack(model_id, gens=5, pop=10, progress_callback=None):
-    if progress_callback: progress_callback({"status": "starting", "message": f"Starting Sponge Attack GA on {model_id}"})
-    print(f"Starting Sponge Attack GA on {model_id}")
+def run_sponge_attack(model_id, gens=5, pop=10, quantize=False, progress_callback=None):
+    quant_str = " (4-bit)" if quantize else ""
+    if progress_callback: progress_callback({"status": "starting", "message": f"Starting Sponge Attack GA on {model_id}{quant_str}"})
+    print(f"Starting Sponge Attack GA on {model_id}{quant_str}")
     
-    if progress_callback: progress_callback({"status": "loading", "message": f"Loading model {model_id}..."})
-    print(f"Loading model {model_id}...")
-    tokenizer, model, device, quant_label = load_model_and_tokenizer(model_id)
+    if progress_callback: progress_callback({"status": "loading", "message": f"Loading model {model_id}{quant_str}..."})
+    print(f"Loading model {model_id}{quant_str}...")
+    tokenizer, model, device, quant_label = load_model_and_tokenizer(model_id, quantize=quantize)
     
     # Initialize Population
     population = []

@@ -171,22 +171,22 @@ def _make_comparison_callback(target_logs_key: str):
     return callback
 
 
-def comparison_worker(model_id: str, quantized_model_id: str, gens: int, pop: int, seed: int):
-    """Run the sponge attack twice: regular model, then pre-quantized model."""
+def comparison_worker(model_id: str, gens: int, pop: int, seed: int):
+    """Run the sponge attack twice: regular (fp16), then quantized (bnb 4-bit)."""
     global comparison_state
     import torch
 
     try:
-        # ── Phase 1: Regular ──
+        # ── Phase 1: Regular (fp16) ──
         comparison_state["phase"] = "regular"
         comparison_state["regular_logs"].append(f"═══ Phase 1/2: Regular model ({model_id}) ═══")
         random.seed(seed)
         run_sponge_attack(
-            model_id, gens=gens, pop=pop,
+            model_id, gens=gens, pop=pop, quantize=False,
             progress_callback=_make_comparison_callback("regular_logs"),
         )
 
-        # Free memory between runs — extra safety on top of sponge_attack cleanup
+        # Free memory between runs
         print("🧹 [main.py] Verifying VRAM is clear between phases...")
         gc.collect()
         if torch.cuda.is_available():
@@ -197,15 +197,15 @@ def comparison_worker(model_id: str, quantized_model_id: str, gens: int, pop: in
             allocated = torch.cuda.memory_allocated() / 1024**3
             print(f"🧹 [main.py] VRAM after inter-phase cleanup: {allocated:.2f} GB")
 
-        # ── Phase 2: Quantized ──
+        # ── Phase 2: Quantized (bitsandbytes NF4 4-bit) ──
         comparison_state["phase"] = "quantized"
         comparison_state["current_generation"] = 0
         comparison_state["quantized_logs"].append(
-            f"═══ Phase 2/2: Quantized model ({quantized_model_id}) ═══"
+            f"═══ Phase 2/2: Quantized model ({model_id} — 4-bit) ═══"
         )
         random.seed(seed)
         run_sponge_attack(
-            quantized_model_id, gens=gens, pop=pop,
+            model_id, gens=gens, pop=pop, quantize=True,
             progress_callback=_make_comparison_callback("quantized_logs"),
         )
 
@@ -223,7 +223,6 @@ def comparison_worker(model_id: str, quantized_model_id: str, gens: int, pop: in
 def start_comparison(
     background_tasks: BackgroundTasks,
     model_id: str = "facebook/opt-2.7b",
-    quantized_model_id: str = "TheBloke/opt-2.7b-GPTQ",
     gens: int = 5,
     pop: int = 10,
 ):
@@ -241,12 +240,12 @@ def start_comparison(
         "regular_logs": [],
         "quantized_logs": [],
         "regular_model_id": model_id,
-        "quantized_model_id": quantized_model_id,
+        "quantized_model_id": model_id,
         "current_generation": 0,
         "total_generations": gens,
     }
 
-    background_tasks.add_task(comparison_worker, model_id, quantized_model_id, gens, pop, seed)
+    background_tasks.add_task(comparison_worker, model_id, gens, pop, seed)
     return {"message": "Comparison started"}
 
 
