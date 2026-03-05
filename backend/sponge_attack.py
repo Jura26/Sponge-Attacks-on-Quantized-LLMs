@@ -26,7 +26,7 @@ import statistics
 # Add backend to path so we can import the model loader
 sys.path.append(os.path.join(os.path.dirname(__file__), 'backend'))
 try:
-    from model import load_model_and_tokenizer
+    from model import load_model_and_tokenizer, cleanup_model
     import torch
 except ImportError as e:
     print(f"❌ Import Error: {e}")
@@ -115,10 +115,13 @@ class SystemMonitor:
             # Only fetch GPU stats when model is actually on CUDA
             if self.device == "cuda" and platform.system() == "Windows":
                 try:
-                    from hardware_monitor import get_gpu_stats
+                    from hardware_monitor import get_gpu_stats, get_gpu_power
                     g_temp, g_load = get_gpu_stats()
                     self.stats["gpu_temp"].append(g_temp)
-                    self.stats["gpu_load"].append(g_load)
+                    self.stats["gpu_load"].append(min(g_load, 100.0))
+                    g_power = get_gpu_power()
+                    if g_power > 0:
+                        self.stats["power"].append(g_power)
                 except:
                     pass
             
@@ -140,46 +143,46 @@ class SystemMonitor:
             self.thread.join()
         
     def get_score(self):
-        """Calculate score based on Latency (Time) and Energy (Temp/Load)."""
+        """Calculate fitness score aligned with Shumailov et al. (EuroS&P 2021).
+
+        The paper's Black-box GA uses a single hardware measurement as fitness:
+          - Primary:  energy consumption  E = P_avg × t  (Joules)
+          - Fallback: inference latency   t  (seconds)   when power sensor unavailable
+
+        This matches the paper's Black-box Energy GA and Black-box Time GA respectively.
+        GPU load is NOT used as a fitness signal — it is reported separately as metadata.
+        """
         if not self.stats["temps"] and not self.stats["cpu"]:
-            return 0, 0, 0, 0, 0, 0
+            return 0, 0, 0, 0, 0, 0, 0, 0
         
         avg_temp = statistics.mean(self.stats["temps"]) if self.stats["temps"] else 0
         max_temp = max(self.stats["temps"]) if self.stats["temps"] else 0
         avg_cpu = statistics.mean(self.stats["cpu"]) if self.stats["cpu"] else 0
         
         # GPU Stats (only populated when device is cuda)
-        avg_gpu_load = statistics.mean(self.stats["gpu_load"]) if self.stats.get("gpu_load") else 0
+        avg_gpu_load = min(statistics.mean(self.stats["gpu_load"]), 100.0) if self.stats.get("gpu_load") else 0
         avg_gpu_temp = statistics.mean(self.stats["gpu_temp"]) if self.stats.get("gpu_temp") else 0
+        
+        # Power draw (Watts)
+        avg_power = statistics.mean(self.stats["power"]) if self.stats.get("power") else 0
 
         duration = self.end_time - self.start_time
         if duration <= 0: duration = 0.001
         
         tps = self.token_count / duration
         
-        # Use device to determine scoring strategy (not torch.cuda.is_available())
-        is_gpu = (self.device == "cuda")
-
-        if is_gpu:
-            # GPU Scoring Strategy
-            latency_factor = 0
-            if tps > 0:
-                latency_factor = 100 / tps
-            
-            # Weighted sum
-            score = (avg_gpu_load * 1.0) + \
-                    (avg_gpu_temp * 1.0) + \
-                    (duration * 10)
-        else:
-            # CPU Scoring - Focus on Duration (Latency) & CPU Temp
-            # If temp is 0 (sensor unavailable), fallback to just Duration
-            temp_score = avg_temp if avg_temp > 0 else 0
-            
-            # The Goal of a Sponge Attack: MAXIMIZE Latency (Duration) + Energy (Temp)
-            # Duration is the most reliable metric if sensors fail.
-            score = (temp_score * 0.5) + (duration * 20)
+        # Total energy consumed: E = P_avg × t  (Watt·seconds = Joules)
+        # This is the paper's core energy formula E = (P_static + P_dynamic) × t
+        energy_joules = avg_power * duration
         
-        return score, max_temp, tps, avg_cpu, avg_gpu_load, duration
+        if energy_joules > 0:
+            # Black-box Energy GA (paper §4.4.1): fitness = measured energy consumption
+            score = energy_joules
+        else:
+            # Black-box Time GA fallback (paper §4.4.1): fitness = inference latency
+            score = duration
+        
+        return score, max_temp, tps, avg_cpu, avg_gpu_load, duration, avg_power, energy_joules
 
 def cooldown(target_temp=60, max_wait=10, device="cpu"):
     """Wait for hardware to cool down to ensure fair testing."""
@@ -324,6 +327,8 @@ def evaluate_population(population, model, tokenizer, device, progress_callback=
             # Calculate remaining space and ensure we generate at least something
             remaining_context = model_max_length - input_len
             safe_max_new_tokens = max(1, remaining_context - 1)
+            # Cap the max new tokens so it doesn't run forever on models with huge context sizes
+            safe_max_new_tokens = min(MAX_NEW_TOKENS, safe_max_new_tokens)
             
             with torch.no_grad():
                 output = model.generate(
@@ -340,13 +345,15 @@ def evaluate_population(population, model, tokenizer, device, progress_callback=
         finally:
             monitor.stop(token_count=generated_tokens)
         
-        score, peak_temp, tps, avg_cpu, avg_gpu, duration = monitor.get_score()
+        score, peak_temp, tps, avg_cpu, avg_gpu, duration, avg_power, energy_joules = monitor.get_score()
         
         # Log appropriate load metric based on actual device
         if device == "cuda":
             load_msg = f"GPU: {avg_gpu:.1f}%"
+            power_msg = f" | Power: {avg_power:.1f}W | Energy: {energy_joules:.1f}J" if avg_power > 0 else ""
         else:
             load_msg = f"CPU: {avg_cpu:.1f}%"
+            power_msg = ""
             
         scores.append({
             "prompt": prompt,
@@ -356,16 +363,18 @@ def evaluate_population(population, model, tokenizer, device, progress_callback=
             "avg_cpu": avg_cpu,
             "avg_gpu": avg_gpu,
             "duration": duration,
+            "avg_power": avg_power,
+            "energy_joules": energy_joules,
             "input_tokens": input_len,
             "output_tokens": generated_tokens,
             "output": generated_text
         })
         temp_str = f"{peak_temp}C" if peak_temp > 0 else "N/A"
-        print(f"    --> Score: {score:.2f} | Temp: {temp_str} | {load_msg} | TPS: {tps:.2f}")
+        print(f"    --> Score: {score:.2f} | Temp: {temp_str} | {load_msg}{power_msg} | TPS: {tps:.2f}")
         if progress_callback:
             progress_callback({
                 "status": "eval", 
-                "message": f"    --> Score: {score:.2f} | Temp: {temp_str} | {load_msg} | TPS: {tps:.2f}"
+                "message": f"    --> Score: {score:.2f} | Temp: {temp_str} | {load_msg}{power_msg} | TPS: {tps:.2f}"
             })
 
     # Sort by score (descending)
@@ -376,9 +385,9 @@ def run_sponge_attack(model_id, gens=5, pop=10, progress_callback=None):
     if progress_callback: progress_callback({"status": "starting", "message": f"Starting Sponge Attack GA on {model_id}"})
     print(f"Starting Sponge Attack GA on {model_id}")
     
-    if progress_callback: progress_callback({"status": "loading", "message": "Loading model..."})
-    print("Loading model...")
-    tokenizer, model, device = load_model_and_tokenizer(model_id)
+    if progress_callback: progress_callback({"status": "loading", "message": f"Loading model {model_id}..."})
+    print(f"Loading model {model_id}...")
+    tokenizer, model, device, quant_label = load_model_and_tokenizer(model_id)
     
     # Initialize Population
     population = []
@@ -416,6 +425,8 @@ def run_sponge_attack(model_id, gens=5, pop=10, progress_callback=None):
                 "best_avg_cpu": best_of_gen.get("avg_cpu", 0),
                 "best_avg_gpu": best_of_gen.get("avg_gpu", 0),
                 "best_duration": best_of_gen.get("duration", 0),
+                "best_avg_power": best_of_gen.get("avg_power", 0),
+                "best_energy_joules": best_of_gen.get("energy_joules", 0),
                 "best_input_tokens": best_of_gen.get("input_tokens", 0),
                 "best_output_tokens": best_of_gen.get("output_tokens", 0)
             })
@@ -446,7 +457,13 @@ def run_sponge_attack(model_id, gens=5, pop=10, progress_callback=None):
         population = new_pop
 
     print("\n💀 Attack Search Complete.")
+    if best_overall is not None:
+        best_overall["quant_label"] = quant_label
     if progress_callback: progress_callback({"status": "complete", "result": best_overall})
+    
+    # Aggressively free model from VRAM (handles accelerate dispatch hooks)
+    cleanup_model(model, tokenizer)
+    
     return best_overall
 
 if __name__ == "__main__":

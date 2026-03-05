@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+psutil
+wmi
+pythonnet
+torch
+transformers==4.40.1
+accelerate
+auto-gptq==0.7.1
+optimum<=1.21.0
+peft==0.10.0

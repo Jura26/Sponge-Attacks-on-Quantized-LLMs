@@ -332,3 +332,107 @@ select.control-input { min-width: 210px; }
   font-size: 10px;
   color: var(--grey-600);
 }
+
+/* ── Compare Button ─────────────────────────────── */
+.attack-btn-compare {
+  background: #2d7ff9;
+}
+
+.attack-btn-compare:hover:not(:disabled) {
+  background: #1b6ee0;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(45, 127, 249, 0.3);
+}
+
+/* ── Comparison Terminal ────────────────────────── */
+.compare-terminal {
+  max-height: 260px;
+}
+
+/* ── Delta Badges Row ───────────────────────────── */
+.delta-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.delta-badge {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 8px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--grey-900);
+  min-width: 100px;
+}
+
+.delta-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.delta-value {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.delta-positive .delta-value { color: #4dbd74; }
+.delta-negative .delta-value { color: #e05252; }
+
+/* ── Side-by-side Comparison Grid ───────────────── */
+.compare-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+@media (max-width: 900px) {
+  .compare-grid { grid-template-columns: 1fr; }
+}
+
+.compare-card {
+  background: var(--grey-900);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+}
+
+.compare-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.compare-card-title {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.compare-card-tag {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 3px;
+  background: var(--grey-800);
+  color: var(--amber);
+  border: 1px solid var(--border-mid);
+}

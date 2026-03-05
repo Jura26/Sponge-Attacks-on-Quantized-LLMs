@@ -341,7 +341,9 @@ def get_gpu_stats():
                             max_load = val
                     elif max_load == 0 and val > max_load: # Fallback
                         max_load = val
-                        
+
+    # Clamp load to 100% (AMD GPUs can report >100% due to sensor artifacts)
+    max_load = min(max_load, 100.0)
     return max_temp, max_load
 
 
@@ -400,4 +402,34 @@ def get_gpu_stats():
                 if st == 4 and val > max_temp: max_temp = val
                 if st == 5 and val > max_load: max_load = val
 
+    # Clamp load to 100% (AMD GPUs can report >100% due to sensor artifacts)
+    max_load = min(max_load, 100.0)
     return max_temp, max_load
+
+
+def get_gpu_power():
+    """Return current GPU power draw in Watts. Returns 0 if unavailable."""
+    import math
+
+    computer = _init_computer()
+    _update_hardware(computer)
+
+    max_power = 0.0
+    gpu_types = (4, 5, 6)
+
+    for hw in computer.Hardware:
+        if int(hw.HardwareType) in gpu_types:
+            for sensor in hw.Sensors:
+                # Power = SensorType 2
+                if int(sensor.SensorType) == 2 and sensor.Value is not None:
+                    val = float(sensor.Value)
+                    if not math.isnan(val) and val > max_power:
+                        max_power = val
+            for sub in hw.SubHardware:
+                for sensor in sub.Sensors:
+                    if int(sensor.SensorType) == 2 and sensor.Value is not None:
+                        val = float(sensor.Value)
+                        if not math.isnan(val) and val > max_power:
+                            max_power = val
+
+    return max_power

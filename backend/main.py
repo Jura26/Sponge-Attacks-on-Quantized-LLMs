@@ -7,10 +7,13 @@ import platform
 import asyncio
 import sys
 import os
+import random
+import gc
 
 # Add current directory to path so we can import local modules
 sys.path.append(os.path.dirname(__file__))
 from sponge_attack import run_sponge_attack
+from model import cleanup_model
 
 app = FastAPI()
 
@@ -116,6 +119,141 @@ def start_attack(background_tasks: BackgroundTasks, model_id: str = "gpt2", gens
 def get_attack_status():
     global attack_state
     return attack_state
+
+# ── A/B Comparison: Regular vs Quantized ─────────────────────
+
+comparison_state = {
+    "is_running": False,
+    "phase": "idle",            # idle | regular | quantized | complete | error
+    "regular_result": None,
+    "quantized_result": None,
+    "regular_logs": [],
+    "quantized_logs": [],
+    "regular_model_id": None,
+    "quantized_model_id": None,
+    "current_generation": 0,
+    "total_generations": 0,
+}
+
+def _make_comparison_callback(target_logs_key: str):
+    """Return a progress callback that writes into comparison_state."""
+    def callback(data):
+        global comparison_state
+        if data.get("status") == "eval":
+            msg = data.get("message", "")
+            if msg:
+                comparison_state[target_logs_key].append(msg)
+        elif data.get("status") == "progress":
+            comparison_state["current_generation"] = data.get("generation")
+            result = {
+                "score": data.get("best_score"),
+                "temp": data.get("best_temp"),
+                "prompt": data.get("best_prompt"),
+                "output": data.get("best_output"),
+                "avg_cpu": data.get("best_avg_cpu", 0),
+                "avg_gpu": data.get("best_avg_gpu", 0),
+                "duration": data.get("best_duration", 0),
+                "input_tokens": data.get("best_input_tokens", 0),
+                "output_tokens": data.get("best_output_tokens", 0),
+            }
+            key = "regular_result" if target_logs_key == "regular_logs" else "quantized_result"
+            comparison_state[key] = result
+            gen_log = f"Gen {data.get('generation')}: Best Score {data.get('best_score'):.2f}"
+            comparison_state[target_logs_key].append(gen_log)
+        elif data.get("status") == "complete":
+            key = "regular_result" if target_logs_key == "regular_logs" else "quantized_result"
+            comparison_state[key] = data.get("result")
+            comparison_state[target_logs_key].append("Phase complete!")
+        else:
+            msg = data.get("message", "")
+            if msg:
+                comparison_state[target_logs_key].append(msg)
+    return callback
+
+
+def comparison_worker(model_id: str, quantized_model_id: str, gens: int, pop: int, seed: int):
+    """Run the sponge attack twice: regular model, then pre-quantized model."""
+    global comparison_state
+    import torch
+
+    try:
+        # ── Phase 1: Regular ──
+        comparison_state["phase"] = "regular"
+        comparison_state["regular_logs"].append(f"═══ Phase 1/2: Regular model ({model_id}) ═══")
+        random.seed(seed)
+        run_sponge_attack(
+            model_id, gens=gens, pop=pop,
+            progress_callback=_make_comparison_callback("regular_logs"),
+        )
+
+        # Free memory between runs — extra safety on top of sponge_attack cleanup
+        print("🧹 [main.py] Verifying VRAM is clear between phases...")
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            if hasattr(torch.cuda, 'ipc_collect'):
+                torch.cuda.ipc_collect()
+            allocated = torch.cuda.memory_allocated() / 1024**3
+            print(f"🧹 [main.py] VRAM after inter-phase cleanup: {allocated:.2f} GB")
+
+        # ── Phase 2: Quantized ──
+        comparison_state["phase"] = "quantized"
+        comparison_state["current_generation"] = 0
+        comparison_state["quantized_logs"].append(
+            f"═══ Phase 2/2: Quantized model ({quantized_model_id}) ═══"
+        )
+        random.seed(seed)
+        run_sponge_attack(
+            quantized_model_id, gens=gens, pop=pop,
+            progress_callback=_make_comparison_callback("quantized_logs"),
+        )
+
+        comparison_state["phase"] = "complete"
+        comparison_state["is_running"] = False
+
+    except Exception as e:
+        comparison_state["phase"] = "error"
+        comparison_state["is_running"] = False
+        target = "quantized_logs" if comparison_state.get("regular_result") else "regular_logs"
+        comparison_state[target].append(f"Error: {str(e)}")
+
+
+@app.post("/api/attack/compare")
+def start_comparison(
+    background_tasks: BackgroundTasks,
+    model_id: str = "facebook/opt-2.7b",
+    quantized_model_id: str = "TheBloke/opt-2.7b-GPTQ",
+    gens: int = 5,
+    pop: int = 10,
+):
+    global comparison_state
+    if comparison_state["is_running"]:
+        return {"error": "Comparison already running"}
+
+    seed = random.randint(0, 2**31)
+
+    comparison_state = {
+        "is_running": True,
+        "phase": "queued",
+        "regular_result": None,
+        "quantized_result": None,
+        "regular_logs": [],
+        "quantized_logs": [],
+        "regular_model_id": model_id,
+        "quantized_model_id": quantized_model_id,
+        "current_generation": 0,
+        "total_generations": gens,
+    }
+
+    background_tasks.add_task(comparison_worker, model_id, quantized_model_id, gens, pop, seed)
+    return {"message": "Comparison started"}
+
+
+@app.get("/api/attack/compare/status")
+def get_comparison_status():
+    global comparison_state
+    return comparison_state
 
 @app.get("/api/stats")
 def get_system_stats():
