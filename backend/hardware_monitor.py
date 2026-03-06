@@ -14,7 +14,7 @@ import os
 import sys
 import threading
 
-# --- Singleton Computer handle (expensive to create, reuse it) ---
+# Singleton LibreHardwareMonitor Computer instance
 _computer = None
 _lock = threading.Lock()
 _LIB_DIR = os.path.join(os.path.dirname(__file__), "lib")
@@ -23,8 +23,8 @@ _DLL_NAME = "LibreHardwareMonitorLib.dll"
 
 def _init_computer():
     """
-    Initialise the LibreHardwareMonitor Computer object once.
-    Must be called from a thread that has COM initialised on Windows.
+    Initializes the LibreHardwareMonitor Computer object.
+    Requires COM initialization on Windows.
     """
     global _computer
 

@@ -10,25 +10,27 @@ import os
 import random
 import gc
 
-# Add current directory to path so we can import local modules
+# Add current directory to path for local module imports
 sys.path.append(os.path.dirname(__file__))
 from sponge_attack import run_sponge_attack
+from context_exhaustion import run_context_exhaustion
+from autodos_attack import run_autodos_attack
 from model import cleanup_model
 
 app = FastAPI()
 
-# Store attack status in memory (simple solution for demo)
-# In production, use Redis or a database.
+# Store attack status in memory 
+# TODO: In production, consider Redis or a persistent database.
 attack_state = {
     "is_running": False,
-    "status": "idle", # idle, starting, loading, running, complete, error
-    "logs": [],       # List of progress messages
+    "status": "idle",
+    "logs": [],
     "current_generation": 0,
     "total_generations": 0,
     "best_result": None
 }
 
-# Enable CORS for frontend
+# Configure CORS for frontend access
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"], 
@@ -37,7 +39,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def sponge_attack_worker(model_id: str, gens: int, pop: int):
+def sponge_attack_worker(model_id: str, gens: int, pop: int, attack_type: str = "evolutionary", num_requests: int = 10, autodos_iterations: int = 3, tree_depth: int = 3, tree_breadth: int = 4):
     """Background task wrapper for the attack script."""
     global attack_state
     
@@ -60,7 +62,8 @@ def sponge_attack_worker(model_id: str, gens: int, pop: int):
                 "avg_gpu": data.get("best_avg_gpu", 0),
                 "duration": data.get("best_duration", 0),
                 "input_tokens": data.get("best_input_tokens", 0),
-                "output_tokens": data.get("best_output_tokens", 0)
+                "output_tokens": data.get("best_output_tokens", 0),
+                "energy_joules": data.get("best_energy", 0)
             }
             # Log best of gen
             gen_log = f"Gen {data.get('generation')}: Best Score {data.get('best_score'):.2f} (Temp: {data.get('best_temp')}C)"
@@ -85,11 +88,22 @@ def sponge_attack_worker(model_id: str, gens: int, pop: int):
     try:
         attack_state["is_running"] = True
         attack_state["status"] = "starting"
-        attack_state["logs"] = ["Starting attack process..."]
-        attack_state["total_generations"] = gens
+        attack_state["logs"] = [f"Starting {attack_type} attack process..."]
+        attack_state["total_generations"] = gens if attack_type == "evolutionary" else 0
         
-        # Run the actual attack synchronously in this thread (it's already in a background task)
-        run_sponge_attack(model_id, gens=gens, pop=pop, progress_callback=callback)
+        if attack_type == "evolutionary":
+            run_sponge_attack(model_id, gens=gens, pop=pop, progress_callback=callback)
+        elif attack_type == "context_exhaustion":
+            run_context_exhaustion(model_id, num_requests=num_requests, is_quantized=False, progress_callback=callback)
+        elif attack_type == "autodos":
+            run_autodos_attack(
+                model_id,
+                num_iterations=autodos_iterations,
+                depth=tree_depth,
+                breadth=tree_breadth,
+                is_quantized=False,
+                progress_callback=callback,
+            )
         
     except Exception as e:
         attack_state["status"] = "error"
@@ -97,7 +111,7 @@ def sponge_attack_worker(model_id: str, gens: int, pop: int):
         attack_state["logs"].append(f"Error: {str(e)}")
 
 @app.post("/api/attack/start")
-def start_attack(background_tasks: BackgroundTasks, model_id: str = "gpt2", gens: int = 5, pop: int = 10):
+def start_attack(background_tasks: BackgroundTasks, model_id: str = "gpt2", gens: int = 5, pop: int = 10, attack_type: str = "evolutionary", num_requests: int = 10, autodos_iterations: int = 3, tree_depth: int = 3, tree_breadth: int = 4):
     global attack_state
     if attack_state["is_running"]:
         return {"error": "Attack already running"}
@@ -108,12 +122,13 @@ def start_attack(background_tasks: BackgroundTasks, model_id: str = "gpt2", gens
         "status": "queued",
         "logs": [],
         "current_generation": 0,
-        "total_generations": gens,
+        "total_generations": gens if attack_type == "evolutionary" else 0,
         "best_result": None
     }
     
-    background_tasks.add_task(sponge_attack_worker, model_id, gens, pop)
+    background_tasks.add_task(sponge_attack_worker, model_id, gens, pop, attack_type, num_requests, autodos_iterations, tree_depth, tree_breadth)
     return {"message": "Attack started"}
+
 
 @app.get("/api/attack/status")
 def get_attack_status():
@@ -171,7 +186,7 @@ def _make_comparison_callback(target_logs_key: str):
     return callback
 
 
-def comparison_worker(model_id: str, gens: int, pop: int, seed: int):
+def comparison_worker(model_id: str, gens: int, pop: int, seed: int, attack_type: str = "evolutionary", num_requests: int = 10, autodos_iterations: int = 3, tree_depth: int = 3, tree_breadth: int = 4):
     """Run the sponge attack twice: regular (fp16), then quantized (int8)."""
     global comparison_state
     import torch
@@ -192,10 +207,23 @@ def comparison_worker(model_id: str, gens: int, pop: int, seed: int):
         comparison_state["phase"] = "regular"
         comparison_state["regular_logs"].append(f"═══ Phase 1/2: Regular model ({model_id}) ═══")
         random.seed(seed)
-        run_sponge_attack(
-            model_id, gens=gens, pop=pop, quantize=False,
-            progress_callback=_make_comparison_callback("regular_logs"),
-        )
+        
+        if attack_type == "evolutionary":
+            run_sponge_attack(
+                model_id, gens=gens, pop=pop, quantize=False,
+                progress_callback=_make_comparison_callback("regular_logs"),
+            )
+        elif attack_type == "context_exhaustion":
+            run_context_exhaustion(
+                model_id, num_requests=num_requests, is_quantized=False, 
+                progress_callback=_make_comparison_callback("regular_logs")
+            )
+        elif attack_type == "autodos":
+            run_autodos_attack(
+                model_id, num_iterations=autodos_iterations,
+                depth=tree_depth, breadth=tree_breadth, is_quantized=False,
+                progress_callback=_make_comparison_callback("regular_logs"),
+            )
 
         # Free memory between runs
         print("🧹 [main.py] Verifying VRAM is clear between phases...")
@@ -215,10 +243,23 @@ def comparison_worker(model_id: str, gens: int, pop: int, seed: int):
             f"═══ Phase 2/2: Quantized model ({model_id} — 4-bit) ═══"
         )
         random.seed(seed)
-        run_sponge_attack(
-            model_id, gens=gens, pop=pop, quantize=True,
-            progress_callback=_make_comparison_callback("quantized_logs"),
-        )
+        
+        if attack_type == "evolutionary":
+            run_sponge_attack(
+                model_id, gens=gens, pop=pop, quantize=True,
+                progress_callback=_make_comparison_callback("quantized_logs"),
+            )
+        elif attack_type == "context_exhaustion":
+            run_context_exhaustion(
+                model_id, num_requests=num_requests, is_quantized=True, 
+                progress_callback=_make_comparison_callback("quantized_logs")
+            )
+        elif attack_type == "autodos":
+            run_autodos_attack(
+                model_id, num_iterations=autodos_iterations,
+                depth=tree_depth, breadth=tree_breadth, is_quantized=True,
+                progress_callback=_make_comparison_callback("quantized_logs"),
+            )
 
         comparison_state["phase"] = "complete"
         comparison_state["is_running"] = False
@@ -236,6 +277,11 @@ def start_comparison(
     model_id: str = "facebook/opt-2.7b",
     gens: int = 5,
     pop: int = 10,
+    attack_type: str = "evolutionary",
+    num_requests: int = 10,
+    autodos_iterations: int = 3,
+    tree_depth: int = 3,
+    tree_breadth: int = 4,
 ):
     global comparison_state
     if comparison_state["is_running"]:
@@ -253,10 +299,10 @@ def start_comparison(
         "regular_model_id": model_id,
         "quantized_model_id": model_id,
         "current_generation": 0,
-        "total_generations": gens,
+        "total_generations": gens if attack_type == "evolutionary" else 0,
     }
 
-    background_tasks.add_task(comparison_worker, model_id, gens, pop, seed)
+    background_tasks.add_task(comparison_worker, model_id, gens, pop, seed, attack_type, num_requests, autodos_iterations, tree_depth, tree_breadth)
     return {"message": "Comparison started"}
 
 

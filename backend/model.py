@@ -65,56 +65,27 @@ def cleanup_model(model, tokenizer=None):
         logger.info(f"🧹 VRAM after cleanup: {allocated_after:.2f} GB allocated")
 
 
-# ── Pure-PyTorch int8 quantization (works on CUDA, ROCm, CPU) ──────────
-
-class _QuantizedLinear(nn.Module):
-    """Drop-in nn.Linear replacement using int8 weights with per-channel scale."""
-
-    def __init__(self, weight_int8: torch.Tensor, bias: torch.Tensor | None, scale: torch.Tensor):
-        super().__init__()
-        self.register_buffer("weight_int8", weight_int8)   # (out, in) int8
-        self.register_buffer("scale", scale)                # (out, 1) same dtype as input
-        if bias is not None:
-            self.register_buffer("bias", bias)
-        else:
-            self.bias = None
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Dequantize on-the-fly: float_weight = int8_weight * scale
-        weight = self.weight_int8.to(x.dtype) * self.scale.to(x.dtype)
-        return torch.nn.functional.linear(x, weight, self.bias)
-
+# ── PyTorch Native Dynamic int8 quantization (Optimized for CPU) ──────────
 
 def _quantize_model_int8(model: nn.Module) -> nn.Module:
-    """Replace every nn.Linear in *model* with an int8-quantized version.
-
-    Uses per-output-channel symmetric quantization.  Only standard PyTorch
-    tensor ops are used, so this works on any backend (CUDA / ROCm / CPU).
+    """Replace every nn.Linear in *model* with a heavily optimized int8 dynamic quantized version.
+    
+    This uses PyTorch's native dynamic quantization which uses optimized C++ backing
+    (FBGEMM/QNNPACK) and is significantly faster on CPUs than pure-python custom implementations.
     """
-    replacements: list[tuple[nn.Module, str, _QuantizedLinear]] = []
-    for name, module in model.named_modules():
-        if not isinstance(module, nn.Linear):
-            continue
-        w = module.weight.data
-        scale = w.abs().amax(dim=1, keepdim=True) / 127.0
-        scale = scale.clamp(min=1e-8)
-        w_int8 = (w / scale).round().clamp(-128, 127).to(torch.int8)
-
-        qlinear = _QuantizedLinear(w_int8, module.bias.data if module.bias is not None else None, scale)
-        # Determine parent module so we can swap the layer in-place
-        if "." in name:
-            parent_name, attr = name.rsplit(".", 1)
-            parent = model.get_submodule(parent_name)
-        else:
-            parent, attr = model, name
-        replacements.append((parent, attr, qlinear))
-
-    for parent, attr, qlinear in replacements:
-        setattr(parent, attr, qlinear)
-
-    n = len(replacements)
-    logger.info(f"⚙️ Replaced {n} Linear layers with int8 quantized versions")
-    return model
+    logger.info("⚙️ Applying PyTorch native dynamic int8 quantization (CPU optimized)...")
+    
+    # Needs to be explicitly imported to ensure backend availability
+    import torch.ao.quantization
+    
+    quantized_model = torch.ao.quantization.quantize_dynamic(
+        model, 
+        {nn.Linear}, 
+        dtype=torch.qint8
+    )
+    
+    logger.info("✅ Replaced Linear layers with PyTorch dynamic int8 quantized versions")
+    return quantized_model
 
 
 def _is_model_cached(model_id: str, hf_token=None) -> bool:

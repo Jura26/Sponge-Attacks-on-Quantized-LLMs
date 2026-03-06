@@ -40,7 +40,6 @@ PROMPT_LENGTH = 20  # Starting length (short, to amplify output/load)
 MUTATION_RATE = 0.2
 MODEL_ID = "gpt2"   # Default, can be overridden
 # Define a range for dynamic token generation
-MIN_NEW_TOKENS = 256
 MAX_NEW_TOKENS = 1024  # Upper limit for token generation
 
 class SystemMonitor:

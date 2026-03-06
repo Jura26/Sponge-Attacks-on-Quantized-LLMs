@@ -94,6 +94,11 @@ const SpongeAttack = () => {
   const [generations, setGenerations] = useState(5);
   const [population, setPopulation] = useState(10);
   const [selectedModel, setSelectedModel] = useState('gpt2');
+  const [attackType, setAttackType] = useState('evolutionary');
+  const [numRequests, setNumRequests] = useState(10);
+  const [autoDoSIterations, setAutoDoSIterations] = useState(3);
+  const [treeDepth, setTreeDepth] = useState(3);
+  const [treeBreadth, setTreeBreadth] = useState(4);
 
   const terminalRef = useRef(null);
   const compareTerminalRef = useRef(null);
@@ -165,7 +170,7 @@ const SpongeAttack = () => {
   const startAttack = async () => {
     try {
       const res = await fetch(
-        `http://localhost:8000/api/attack/start?model_id=${encodeURIComponent(selectedModel)}&gens=${generations}&pop=${population}`,
+        `http://localhost:8000/api/attack/start?model_id=${encodeURIComponent(selectedModel)}&gens=${generations}&pop=${population}&attack_type=${attackType}&num_requests=${numRequests}&autodos_iterations=${autoDoSIterations}&tree_depth=${treeDepth}&tree_breadth=${treeBreadth}`,
         { method: 'POST' }
       );
       if (res.ok) { setLogs([]); setBestResult(null); }
@@ -177,7 +182,7 @@ const SpongeAttack = () => {
     if (!hasQuantized) return;
     try {
       const res = await fetch(
-        `http://localhost:8000/api/attack/compare?model_id=${encodeURIComponent(selectedModel)}&gens=${generations}&pop=${population}`,
+        `http://localhost:8000/api/attack/compare?model_id=${encodeURIComponent(selectedModel)}&gens=${generations}&pop=${population}&attack_type=${attackType}&num_requests=${numRequests}&autodos_iterations=${autoDoSIterations}&tree_depth=${treeDepth}&tree_breadth=${treeBreadth}`,
         { method: 'POST' }
       );
       if (res.ok) {
@@ -212,13 +217,45 @@ const SpongeAttack = () => {
           </select>
         </div>
         <div className="control-group">
-          <label className="control-label">Generations</label>
-          <input type="number" className="control-input" value={generations} onChange={e => setGenerations(parseInt(e.target.value))} disabled={anyRunning} min="1" />
+          <label className="control-label">Attack Type</label>
+          <select className="control-input" value={attackType} onChange={e => setAttackType(e.target.value)} disabled={anyRunning}>
+            <option value="evolutionary">Evolutionary Sponge</option>
+            <option value="context_exhaustion">Context Exhaustion</option>
+            <option value="autodos">AutoDoS (Tree-based)</option>
+          </select>
         </div>
-        <div className="control-group">
-          <label className="control-label">Population</label>
-          <input type="number" className="control-input" value={population} onChange={e => setPopulation(parseInt(e.target.value))} disabled={anyRunning} min="1" />
-        </div>
+        {attackType === 'evolutionary' ? (
+          <>
+            <div className="control-group">
+              <label className="control-label">Generations</label>
+              <input type="number" className="control-input" value={generations} onChange={e => setGenerations(parseInt(e.target.value))} disabled={anyRunning} min="1" />
+            </div>
+            <div className="control-group">
+              <label className="control-label">Population</label>
+              <input type="number" className="control-input" value={population} onChange={e => setPopulation(parseInt(e.target.value))} disabled={anyRunning} min="2" />
+            </div>
+          </>
+        ) : attackType === 'context_exhaustion' ? (
+          <div className="control-group">
+            <label className="control-label">Num Requests</label>
+            <input type="number" className="control-input" value={numRequests} onChange={e => setNumRequests(parseInt(e.target.value))} disabled={anyRunning} min="1" />
+          </div>
+        ) : (
+          <>
+            <div className="control-group">
+              <label className="control-label">Iterations</label>
+              <input type="number" className="control-input" value={autoDoSIterations} onChange={e => setAutoDoSIterations(parseInt(e.target.value))} disabled={anyRunning} min="1" />
+            </div>
+            <div className="control-group">
+              <label className="control-label">Tree Depth</label>
+              <input type="number" className="control-input" value={treeDepth} onChange={e => setTreeDepth(parseInt(e.target.value))} disabled={anyRunning} min="1" max="10" />
+            </div>
+            <div className="control-group">
+              <label className="control-label">Tree Breadth</label>
+              <input type="number" className="control-input" value={treeBreadth} onChange={e => setTreeBreadth(parseInt(e.target.value))} disabled={anyRunning} min="1" max="10" />
+            </div>
+          </>
+        )}
         <button className={`attack-btn${isRunning ? ' attack-btn-running' : ''}`} onClick={startAttack} disabled={anyRunning}>
           {isRunning ? <><span className="btn-spinner" />Running...</> : 'Start Attack'}
         </button>
@@ -383,7 +420,7 @@ const SpongeAttack = () => {
           {/* Side-by-side results */}
           <div className="compare-grid">
             <ResultCard title="Regular" result={regularResult} tag={regularResult?.quant_label ?? 'fp16'} />
-            <ResultCard title="Quantized (int8)" result={quantizedResult} tag={quantizedResult?.quant_label ?? 'int8'} />
+            <ResultCard title="Quantized (int4)" result={quantizedResult} tag={quantizedResult?.quant_label ?? 'int4'} />
           </div>
         </>
       )}
