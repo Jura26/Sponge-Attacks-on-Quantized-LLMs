@@ -1,6 +1,6 @@
 {
-  "short_name": "MyApp",
-  "name": "My React Application",
+  "short_name": "SpongeAttacks",
+  "name": "Sponge Attacks on Quantized LLMs",
   "icons": [
     {
       "src": "icon-192x192.png",

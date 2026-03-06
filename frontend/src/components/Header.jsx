@@ -25,9 +25,9 @@ const Header = () => {
               <line x1="1" y1="9" x2="4" y2="9" /><line x1="1" y1="14" x2="4" y2="14" />
             </svg>
           </div>
-          <span className="header-title">SYSMON</span>
+          <span className="header-title">Sponge Attacks</span>
           <span className="header-sep">/</span>
-          <span className="header-sub">RESOURCE MONITOR</span>
+          <span className="header-sub">Quantized LLMs</span>
         </div>
         <div className="header-right">
           <div className="header-meta">
