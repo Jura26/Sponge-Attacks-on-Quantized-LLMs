@@ -21,7 +21,7 @@ import time
 import random
 import torch
 from model import load_model_and_tokenizer, cleanup_model
-from sponge_attack import SystemMonitor
+from evolutionary_sponge import SystemMonitor
 
 
 # ── Seed Topics & Decomposition Templates ────────────────────

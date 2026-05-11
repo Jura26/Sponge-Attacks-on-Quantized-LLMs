@@ -142,38 +142,6 @@ class SystemMonitor:
                         current = getattr(entry, 'current', 0)
                         if current > max_temp:
                             max_temp = current
-            elif platform.system() == "Windows":
-                if self.device == "cuda":
-                    # GPU temperature
-                    try:
-                        from hardware_monitor import get_gpu_stats
-                        g_temp, _ = get_gpu_stats()
-                        if g_temp > max_temp:
-                            max_temp = g_temp
-                    except Exception:
-                        pass
-                else:
-                    # CPU temperature
-                    try:
-                        from hardware_monitor import get_cpu_stats
-                        c_temp, _ = get_cpu_stats()
-                        if c_temp > max_temp:
-                            max_temp = c_temp
-                    except Exception:
-                        pass
-                    # Fallback: ACPI thermal zones
-                    if max_temp == 0:
-                        try:
-                            import wmi
-                            import pythoncom
-                            pythoncom.CoInitialize()
-                            w = wmi.WMI(namespace="root\\cimv2")
-                            for zone in w.Win32_PerfFormattedData_Counters_ThermalZoneInformation():
-                                celsius = float(zone.Temperature) - 273.15
-                                if celsius > max_temp:
-                                    max_temp = celsius
-                        except Exception:
-                            pass
         except:
             pass
         return max_temp

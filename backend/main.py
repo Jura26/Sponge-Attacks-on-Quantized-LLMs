@@ -28,7 +28,7 @@ except OSError:
 
 # Add current directory to path for local module imports
 sys.path.append(os.path.dirname(__file__))
-from sponge_attack import run_sponge_attack
+from evolutionary_sponge import run_sponge_attack
 from context_exhaustion import run_context_exhaustion
 from autodos_attack import run_autodos_attack
 from model import cleanup_model, resolve_gguf_variant_path, get_last_gguf_selection

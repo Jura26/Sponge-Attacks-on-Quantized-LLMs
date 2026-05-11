@@ -4,7 +4,7 @@ import time
 import torch
 import random
 from model import load_model_and_tokenizer, cleanup_model
-from sponge_attack import SystemMonitor
+from evolutionary_sponge import SystemMonitor
 
 
 def _estimate_safe_target_seq_len(model, device: str, context_limit: int) -> int:
@@ -18,7 +18,11 @@ def _estimate_safe_target_seq_len(model, device: str, context_limit: int) -> int
     SAFETY_BYTES = int(1.5 * 1024**3)
     MIN_TARGET = 512
 
-    requested = max(50, context_limit - 100)
+    requested = max(50, context_limit - 256)
+    
+    if not isinstance(model, torch.nn.Module):
+        return requested
+
     if device != "cuda" or not torch.cuda.is_available():
         return requested
 
@@ -105,9 +109,16 @@ def run_context_exhaustion(
 
             for attempt in range(5):
                 try:
-                    vocab_size = getattr(tokenizer, 'vocab_size', 50257)
-                    input_ids = torch.randint(100, vocab_size - 100, (1, effective_target)).to(device)
-
+                    # Generate purely valid ASCII text to prevent detokenization expansion & invalid unicode errors
+                    # Generate more than enough chars, then truncate to the exact token limit
+                    base_text = "".join(random.choices("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ", k=effective_target * 5))
+                    input_ids = tokenizer(base_text, truncation=True, max_length=effective_target).input_ids.to(device)
+                    
+                    # Pad if for some reason it's shorter than expected
+                    if input_ids.shape[1] < effective_target:
+                        padding = torch.randint(50, 100, (1, effective_target - input_ids.shape[1])).to(device)
+                        input_ids = torch.cat([input_ids, padding], dim=1)
+                        
                     prompt_text = tokenizer.decode(input_ids[0][-20:], skip_special_tokens=True)
 
                     # Phase A: prefill-only forward pass (context pressure source)
@@ -127,7 +138,12 @@ def run_context_exhaustion(
                         generated_text = "[prefill_only]"
                     else:
                         # Phase B: controlled decode stress (fixed token budget)
-                        max_new_tokens = max(1, min(int(force_decode_tokens), context_limit - effective_target - 1))
+                        # Exhaust the rest of the context window
+                        # Adding safety buffer of 16 tokens for GGUF/llama.cpp detokenization discrepancies
+                        safety_buffer = 1 if isinstance(model, torch.nn.Module) else 16
+                        max_new_tokens = max(1, context_limit - effective_target - safety_buffer)
+                        if force_decode_tokens > max_new_tokens:
+                             max_new_tokens = force_decode_tokens
                         min_new_tokens = max_new_tokens
                         eos_token_id = None if disable_eos_stop else tokenizer.eos_token_id
 
@@ -155,7 +171,7 @@ def run_context_exhaustion(
                     break
                 except Exception as e:
                     msg = str(e)
-                    is_oom = "out of memory" in msg.lower() or "hip out of memory" in msg.lower()
+                    is_oom = "out of memory" in msg.lower() or "hip out of memory" in msg.lower() or "llama_decode returned 1" in msg.lower() or "context" in msg.lower()
                     if not is_oom or effective_target <= 512 or attempt == 4:
                         error_msg = msg
                         generated_text = f"Error: {error_msg}"
@@ -224,9 +240,10 @@ def run_context_exhaustion(
         gc.collect()
         
         # Calculate summary/score equivalent to best_result for frontend compat
-        best_duration = max([r["duration"] for r in results if not r.get("error")] + [0])
-        best_cpu = max([r["avg_cpu"] for r in results if not r.get("error")] + [0])
-        best_gpu = max([r["avg_gpu"] for r in results if not r.get("error")] + [0])
+        valid_results = [r for r in results if not r.get("error")]
+        best_duration = overall_duration
+        best_cpu = sum([r["avg_cpu"] for r in valid_results]) / max(1, len(valid_results)) if valid_results else 0
+        best_gpu = sum([r["avg_gpu"] for r in valid_results]) / max(1, len(valid_results)) if valid_results else 0
         total_energy = sum([r.get("energy_joules", 0) for r in results])
         avg_prefill_duration = (
             sum(r.get("prefill_duration", 0.0) for r in results if not r.get("error")) /
@@ -249,7 +266,7 @@ def run_context_exhaustion(
         best_req = max(results, key=lambda x: x["duration"], default=results[0] if results else {})
         
         final_result = {
-            "score": best_duration, # Use max latency as a score proxy
+            "score": total_energy, # Use energy as score proxy
             "duration": overall_duration,
             "avg_cpu": best_cpu,
             "avg_gpu": best_gpu,
