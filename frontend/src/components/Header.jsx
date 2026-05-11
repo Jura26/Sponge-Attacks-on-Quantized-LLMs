@@ -34,10 +34,6 @@ const Header = () => {
             <span className="header-date">{date}</span>
             <span className="header-clock">{ts}</span>
           </div>
-          <div className="header-status">
-            <span className="status-pip" />
-            <span>LIVE</span>
-          </div>
         </div>
       </div>
     </header>

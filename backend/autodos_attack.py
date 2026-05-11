@@ -148,8 +148,9 @@ def run_autodos_attack(
                 ),
             })
 
+        quant_mode = is_quantized if isinstance(is_quantized, str) else ("bnb-nf4" if is_quantized else "none")
         tokenizer, model, device, quant_label = load_model_and_tokenizer(
-            model_id, quantize=is_quantized
+            model_id, quantize=quant_mode
         )
 
         # Model context limit
@@ -197,8 +198,8 @@ def run_autodos_attack(
                 })
 
             # Tokenize and truncate to fit context (leave room for output)
-            max_gen_tokens = min(512, context_limit - 50)
-            max_input_len = context_limit - max_gen_tokens - 10
+            max_gen_tokens = min(2048, context_limit - 1)
+            max_input_len = max(1, context_limit - 10)
             inputs = tokenizer(
                 prompt_text,
                 return_tensors="pt",
@@ -232,7 +233,6 @@ def run_autodos_attack(
                 with torch.no_grad():
                     out = model.generate(
                         **inputs,
-                        min_new_tokens=actual_max_gen,
                         max_new_tokens=actual_max_gen,
                         do_sample=True,
                         temperature=0.9,
@@ -252,11 +252,14 @@ def run_autodos_attack(
             score, max_temp, tps, cpu, gpu, duration, avg_power, energy = (
                 monitor.get_score()
             )
+            # Prefer GPU energy consumption as the score when available.
+            if energy > 0:
+                score = energy
 
             msg = (
                 f"  Iter {iter_num} done ({duration:.2f}s) | "
                 f"Tokens out: {output_tokens} | "
-                f"CPU: {cpu:.1f}% | GPU: {gpu:.1f}%"
+                f"CPU: {cpu:.1f}%"
             )
             if energy > 0:
                 msg += f" | Energy: {energy:.1f}J"
@@ -288,6 +291,10 @@ def run_autodos_attack(
 
         overall_duration = time.time() - overall_start
         cleanup_model(model, tokenizer)
+        model = None
+        tokenizer = None
+        import gc
+        gc.collect()
 
         # Build final result from the worst-case (highest score) iteration
         valid = [r for r in results if not r.get("error")]
@@ -298,7 +305,7 @@ def run_autodos_attack(
 
         final_result = {
             "score": best.get("score", 0),
-            "duration": overall_duration,
+            "duration": best.get("duration", 0),
             "avg_cpu": best.get("avg_cpu", 0),
             "avg_gpu": best.get("avg_gpu", 0),
             "avg_power": best.get("avg_power", 0),

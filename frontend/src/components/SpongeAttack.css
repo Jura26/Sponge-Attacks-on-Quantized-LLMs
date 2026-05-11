@@ -54,6 +54,60 @@ select.control-input { min-width: 210px; }
 
 .control-input:disabled { opacity: 0.35; cursor: not-allowed; }
 
+.control-help {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: #d08b2f;
+  max-width: 260px;
+}
+
+.compare-plan {
+  min-width: 300px;
+  max-width: 420px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-mid);
+  border-radius: var(--radius-sm);
+  background: linear-gradient(180deg, #171a1f 0%, #13161b 100%);
+}
+
+.compare-plan-title {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.compare-plan-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+}
+
+.plan-badge {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #0b0b0b;
+  background: var(--amber);
+  border-radius: 999px;
+  padding: 2px 6px;
+}
+
+.compare-plan-note {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--grey-500);
+  margin-top: 4px;
+}
+
 .attack-btn {
   padding: 8px 22px;
   font-size: 11px;
@@ -146,6 +200,10 @@ select.control-input { min-width: 210px; }
 }
 
 .attack-status-score strong { color: var(--amber); font-weight: 700; }
+
+.compare-legend {
+  font-size: 10px;
+}
 
 /* ── Dashboard ──────────────────────────────────── */
 .attack-dashboard {
@@ -354,6 +412,14 @@ select.control-input { min-width: 210px; }
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.delta-caption {
+  width: 100%;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-bottom: 2px;
 }
 
 .delta-badge {

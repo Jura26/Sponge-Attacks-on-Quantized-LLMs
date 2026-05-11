@@ -1,8 +1,6 @@
 fastapi
 uvicorn[standard]
 psutil
-wmi
-pythonnet
 torch
-transformers==4.40.1
-accelerate
+llama-cpp-python
+ python-dotenv

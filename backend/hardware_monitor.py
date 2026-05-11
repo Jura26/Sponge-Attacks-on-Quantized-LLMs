@@ -1,6 +1,6 @@
 """
 Hardware monitoring via LibreHardwareMonitorLib (.NET DLL).
-Provides per-core CPU temps, GPU temps, SSD temps, fan speeds, power draw, etc.
+Provides GPU temps, SSD temps, fan speeds, power draw, etc. (CPU stats removed as per user request)
 
 Setup:
   1. pip install pythonnet
@@ -114,7 +114,7 @@ _HARDWARE_TYPE_MAP = {
 def get_all_sensors():
     """
     Returns a dict of sensor groups, each containing a list of readings.
-    Groups: cpu_temps, gpu_temps, storage_temps, fans, power, motherboard_temps, etc.
+    Groups: gpu_temps, storage_temps, fans, power, motherboard_temps, etc. (CPU stats removed as per user request)
     Each reading: {label, current, high, critical, source, unit}
     """
     import math

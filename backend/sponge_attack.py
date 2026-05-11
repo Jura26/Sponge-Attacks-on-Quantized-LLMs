@@ -53,10 +53,82 @@ class SystemMonitor:
             "gpu_load": [],
             "gpu_temp": []
         }
+        self._amd_paths = None
         self.start_time = 0
         self.end_time = 0
         self.token_count = 0
         self.thread = None
+
+    def _find_amd_paths(self):
+        if self._amd_paths is not None:
+            return self._amd_paths
+        base = "/sys/class/drm"
+        power_path = None
+        temp_path = None
+        load_path = None
+        try:
+            for entry in os.listdir(base):
+                if not entry.startswith("card"):
+                    continue
+                hwmon_base = os.path.join(base, entry, "device", "hwmon")
+                if not os.path.isdir(hwmon_base):
+                    continue
+                for hwmon in os.listdir(hwmon_base):
+                    hwmon_dir = os.path.join(hwmon_base, hwmon)
+                    for fname in ("power1_average", "power1_input"):
+                        candidate = os.path.join(hwmon_dir, fname)
+                        if os.path.isfile(candidate):
+                            power_path = candidate
+                            break
+                    temp_candidate = os.path.join(hwmon_dir, "temp1_input")
+                    if os.path.isfile(temp_candidate):
+                        temp_path = temp_candidate
+                    if power_path and temp_path:
+                        break
+                load_candidate = os.path.join(base, entry, "device", "gpu_busy_percent")
+                if os.path.isfile(load_candidate):
+                    load_path = load_candidate
+                if power_path or temp_path or load_path:
+                    break
+        except Exception:
+            pass
+        self._amd_paths = {
+            "power": power_path,
+            "temp": temp_path,
+            "load": load_path,
+        }
+        return self._amd_paths
+
+    def _read_amd_stats(self):
+        paths = self._find_amd_paths()
+        if not paths:
+            return None
+        power_w = None
+        temp_c = None
+        load_pct = None
+        try:
+            if paths.get("power"):
+                with open(paths["power"], "r", encoding="utf-8") as f:
+                    micro_watts = int(f.read().strip())
+                    power_w = micro_watts / 1_000_000.0
+        except Exception:
+            pass
+        try:
+            if paths.get("temp"):
+                with open(paths["temp"], "r", encoding="utf-8") as f:
+                    milli_c = int(f.read().strip())
+                    temp_c = milli_c / 1000.0
+        except Exception:
+            pass
+        try:
+            if paths.get("load"):
+                with open(paths["load"], "r", encoding="utf-8") as f:
+                    load_pct = float(f.read().strip())
+        except Exception:
+            pass
+        if power_w is None and temp_c is None and load_pct is None:
+            return None
+        return power_w, load_pct, temp_c
 
     def _get_temp(self):
         """Get the relevant temperature based on device (CPU or GPU)."""
@@ -123,6 +195,16 @@ class SystemMonitor:
                         self.stats["power"].append(g_power)
                 except:
                     pass
+            elif self.device == "cuda" and platform.system() == "Linux":
+                amd_stats = self._read_amd_stats()
+                if amd_stats:
+                    power_w, load_pct, temp_c = amd_stats
+                    if power_w is not None and power_w > 0:
+                        self.stats["power"].append(power_w)
+                    if load_pct is not None:
+                        self.stats["gpu_load"].append(min(load_pct, 100.0))
+                    if temp_c is not None:
+                        self.stats["gpu_temp"].append(temp_c)
             
             time.sleep(0.1) 
 
@@ -346,20 +428,15 @@ def evaluate_population(population, model, tokenizer, device, progress_callback=
         
         score, peak_temp, tps, avg_cpu, avg_gpu, duration, avg_power, energy_joules = monitor.get_score()
         
-        # Log appropriate load metric based on actual device
-        if device == "cuda":
-            load_msg = f"GPU: {avg_gpu:.1f}%"
-            power_msg = f" | Power: {avg_power:.1f}W | Energy: {energy_joules:.1f}J" if avg_power > 0 else ""
-        else:
-            load_msg = f"CPU: {avg_cpu:.1f}%"
-            power_msg = ""
+        # CPU load message removed as per user request
+        power_msg = f" | Power: {avg_power:.1f}W | Energy: {energy_joules:.1f}J" if avg_power > 0 else ""
             
         scores.append({
             "prompt": prompt,
             "score": score,
             "peak_temp": peak_temp,
             "tps": tps,
-            "avg_cpu": avg_cpu,
+            # CPU load removed as per user request
             "avg_gpu": avg_gpu,
             "duration": duration,
             "avg_power": avg_power,
@@ -369,11 +446,11 @@ def evaluate_population(population, model, tokenizer, device, progress_callback=
             "output": generated_text
         })
         temp_str = f"{peak_temp}C" if peak_temp > 0 else "N/A"
-        print(f"    --> Score: {score:.2f} | Temp: {temp_str} | {load_msg}{power_msg} | TPS: {tps:.2f}")
+        print(f"    --> Score: {score:.2f} | Temp: {temp_str}{power_msg} | TPS: {tps:.2f}")
         if progress_callback:
             progress_callback({
                 "status": "eval", 
-                "message": f"    --> Score: {score:.2f} | Temp: {temp_str} | {load_msg}{power_msg} | TPS: {tps:.2f}"
+                "message": f"    --> Score: {score:.2f} | Temp: {temp_str}{power_msg} | TPS: {tps:.2f}"
             })
 
     # Sort by score (descending)
@@ -381,13 +458,14 @@ def evaluate_population(population, model, tokenizer, device, progress_callback=
     return scores
 
 def run_sponge_attack(model_id, gens=5, pop=10, quantize=False, progress_callback=None):
-    quant_str = " (4-bit)" if quantize else ""
+    quant_mode = quantize if isinstance(quantize, str) else ("bnb-nf4" if quantize else "none")
+    quant_str = f" ({quant_mode})" if quant_mode != "none" else ""
     if progress_callback: progress_callback({"status": "starting", "message": f"Starting Sponge Attack GA on {model_id}{quant_str}"})
     print(f"Starting Sponge Attack GA on {model_id}{quant_str}")
     
     if progress_callback: progress_callback({"status": "loading", "message": f"Loading model {model_id}{quant_str}..."})
     print(f"Loading model {model_id}{quant_str}...")
-    tokenizer, model, device, quant_label = load_model_and_tokenizer(model_id, quantize=quantize)
+    tokenizer, model, device, quant_label = load_model_and_tokenizer(model_id, quantize=quant_mode)
     
     # Initialize Population
     population = []
@@ -422,7 +500,7 @@ def run_sponge_attack(model_id, gens=5, pop=10, quantize=False, progress_callbac
                 "best_temp": best_of_gen["peak_temp"],
                 "best_prompt": best_of_gen["prompt"],
                 "best_output": best_of_gen["output"],
-                "best_avg_cpu": best_of_gen.get("avg_cpu", 0),
+                # CPU load removed as per user request
                 "best_avg_gpu": best_of_gen.get("avg_gpu", 0),
                 "best_duration": best_of_gen.get("duration", 0),
                 "best_avg_power": best_of_gen.get("avg_power", 0),
@@ -461,8 +539,12 @@ def run_sponge_attack(model_id, gens=5, pop=10, quantize=False, progress_callbac
         best_overall["quant_label"] = quant_label
     if progress_callback: progress_callback({"status": "complete", "result": best_overall})
     
-    # Aggressively free model from VRAM (handles accelerate dispatch hooks)
+    # Aggressively free model from VRAM/RAM (handles accelerate dispatch hooks)
     cleanup_model(model, tokenizer)
+    model = None
+    tokenizer = None
+    import gc
+    gc.collect()
     
     return best_overall
 

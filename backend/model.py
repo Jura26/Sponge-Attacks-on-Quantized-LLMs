@@ -1,246 +1,382 @@
 import argparse
-import os
-import torch
-import torch.nn as nn
-from transformers import AutoTokenizer, AutoModelForCausalLM
+import glob
 import logging
+import os
+import re
+from types import SimpleNamespace
 
-# Configure simple logging
-logging.basicConfig(level=logging.INFO, format='%(message)s')
+import torch
+
+logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
 
-def cleanup_model(model, tokenizer=None):
-    """Aggressively free a model from GPU VRAM.
+GGUF_VARIANT_TOKENS = {
+    "gguf-f16": ["f16", "fp16"],
+    "gguf-q8": ["q8_0", "q8"],
+    "gguf-q6": ["q6_k", "q6_k_l", "q6"],
+    "gguf-q5": ["q5_k_m", "q5_k_s", "q5_1", "q5_0", "q5"],
+    "gguf-q4": ["q4_k_m", "q4_k_s", "q4_1", "q4_0", "q4"],
+    "gguf-q3": ["q3_k_l", "q3_k_m", "q3_k_s", "q3_0", "q3"],
+    "gguf-q2": ["q2_k", "q2_0", "q2"],
+}
 
-    Handles models loaded with device_map='auto' (accelerate dispatch hooks)
-    which prevent normal .cpu() / del from releasing VRAM.
+_LAST_GGUF_SELECTION = {
+    "model_id": None,
+    "quant_mode": None,
+    "path": None,
+}
+
+
+class _InputBatch(dict):
+    """Minimal tensor-batch wrapper with `.to()` for attack code compatibility."""
+
+    def to(self, _device):
+        return self
+
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+
+class GGUFTokenizerAdapter:
+    """Tokenizer-like adapter for llama.cpp backends."""
+
+    def __init__(self, llm):
+        self.llm = llm
+        self.eos_token_id = 2
+        self.pad_token_id = 2
+        self.vocab_size = int(getattr(llm, "n_vocab", lambda: 32000)())
+
+    def encode(self, text, add_special_tokens=False):
+        _ = add_special_tokens
+        return self.llm.tokenize(text.encode("utf-8"), add_bos=False)
+
+    def decode(self, tokens, skip_special_tokens=True):
+        _ = skip_special_tokens
+        if hasattr(tokens, "tolist"):
+            tokens = tokens.tolist()
+        if tokens and isinstance(tokens[0], list):
+            tokens = tokens[0]
+        b = self.llm.detokenize(tokens)
+        return b.decode("utf-8", errors="ignore")
+
+    def __call__(self, text, return_tensors="pt", truncation=False, max_length=None):
+        _ = return_tensors
+        toks = self.encode(text, add_special_tokens=False)
+        if truncation and max_length is not None:
+            toks = toks[:max_length]
+        t = torch.tensor([toks], dtype=torch.long)
+        return _InputBatch(input_ids=t)
+
+
+class GGUFModelAdapter:
+    """Model-like adapter exposing `generate()` and prefill call for llama.cpp."""
+
+    def __init__(self, llm, n_ctx=4096):
+        self.llm = llm
+        # Keep CPU tensor semantics for adapter compatibility.
+        # GPU offload is managed inside llama.cpp by n_gpu_layers.
+        self.device = "cpu"
+        self.config = SimpleNamespace(max_position_embeddings=int(n_ctx), n_positions=int(n_ctx))
+
+    def eval(self):
+        return self
+
+    def generate(self, input_ids=None, max_new_tokens=64, do_sample=True, temperature=0.7, top_p=0.9, **_kwargs):
+        if input_ids is None:
+            raise ValueError("input_ids is required")
+
+        if hasattr(input_ids, "tolist"):
+            in_toks = input_ids.tolist()[0]
+        else:
+            in_toks = list(input_ids[0])
+
+        prompt = self.llm.detokenize(in_toks).decode("utf-8", errors="ignore")
+        out = self.llm.create_completion(
+            prompt=prompt,
+            max_tokens=int(max_new_tokens),
+            temperature=float(temperature if do_sample else 0.0),
+            top_p=float(top_p),
+            echo=False,
+        )
+        gen_text = out["choices"][0].get("text", "")
+        gen_toks = self.llm.tokenize(gen_text.encode("utf-8"), add_bos=False)
+        merged = in_toks + gen_toks
+        return torch.tensor([merged], dtype=torch.long)
+
+    def __call__(self, input_ids=None, use_cache=True, return_dict=True, **_kwargs):
+        _ = use_cache
+        if input_ids is None:
+            raise ValueError("input_ids is required")
+        toks = input_ids.tolist()[0]
+
+        try:
+            self.llm.reset()
+            self.llm.eval(toks)
+        except Exception:
+            prompt = self.llm.detokenize(toks).decode("utf-8", errors="ignore")
+            self.llm.create_completion(prompt=prompt, max_tokens=1, temperature=0.0, top_p=1.0, echo=True)
+
+        if return_dict:
+            return {"last_hidden_state": None}
+        return None
+
+
+def _quant_bits_from_name(path: str) -> int:
+    name_l = os.path.basename(path).lower()
+    if "f16" in name_l or "fp16" in name_l:
+        return 16
+    m = re.search(r"q([2-8])(?:[_\\.-]|$)", name_l)
+    if m:
+        return int(m.group(1))
+    return 0
+
+
+def _family_hint_from_path(path: str) -> str:
+    stem = os.path.splitext(os.path.basename(path))[0].lower()
+    stem = re.sub(r"[-_.]?(f16|fp16|fp32).*$", "", stem)
+    stem = re.sub(r"[-_.]?q[2-8].*$", "", stem)
+    return stem.strip("-_. ")
+
+
+def _normalize_quant_mode(quantize) -> str:
+    """Normalize input into a GGUF quant mode.
+
+    Unsupported/non-GGUF values fall back to gguf-f16.
     """
+    if quantize is False or quantize is None:
+        return "gguf-f16"
+    if quantize is True:
+        return "gguf-q4"
+
+    mode = str(quantize).strip().lower()
+    aliases = {
+        "none": "gguf-f16",
+        "full": "gguf-f16",
+        "fp16": "gguf-f16",
+        "fp32": "gguf-f16",
+        "no": "gguf-f16",
+        "off": "gguf-f16",
+        "gguf": "gguf-q4",
+        "llamacpp": "gguf-q4",
+        "llama.cpp": "gguf-q4",
+        "gguf-llamacpp": "gguf-q4",
+        "gguf-f16": "gguf-f16",
+        "gguf-q8": "gguf-q8",
+        "gguf-q6": "gguf-q6",
+        "gguf-q5": "gguf-q5",
+        "gguf-q4": "gguf-q4",
+        "gguf-q3": "gguf-q3",
+        "gguf-q2": "gguf-q2",
+    }
+    return aliases.get(mode, "gguf-f16")
+
+
+def resolve_gguf_variant_path(model_id: str, quant_mode: str) -> str:
+    """Resolve GGUF file path for a model id + quant mode."""
+    gguf_mode = quant_mode if quant_mode in GGUF_VARIANT_TOKENS else "gguf-q4"
+
+    if model_id.startswith("gguf:"):
+        return model_id.split("gguf:", 1)[1].strip()
+    if model_id.lower().endswith(".gguf"):
+        return model_id
+
+    default_path = os.environ.get("SPONGE_GGUF_PATH", "").strip()
+    gguf_dir = os.environ.get("SPONGE_GGUF_DIR", "").strip()
+    if not gguf_dir and default_path:
+        gguf_dir = os.path.dirname(default_path)
+
+    mode_tokens = GGUF_VARIANT_TOKENS.get(gguf_mode, [])
+    basename_filter = os.environ.get("SPONGE_GGUF_BASENAME", "").strip().lower()
+    if not basename_filter and default_path:
+        basename_filter = _family_hint_from_path(default_path)
+    if not basename_filter:
+        model_hint = os.path.basename(model_id).strip().lower()
+        if model_hint and model_hint != model_id.lower():
+            basename_filter = model_hint
+        elif model_hint:
+            basename_filter = model_hint
+
+    if gguf_dir and os.path.isdir(gguf_dir):
+        candidates = sorted(glob.glob(os.path.join(gguf_dir, "*.gguf")))
+        if basename_filter:
+            filtered = [p for p in candidates if basename_filter in os.path.basename(p).lower()]
+            if filtered:
+                candidates = filtered
+            else:
+                return default_path
+
+        if not candidates:
+            return default_path
+
+        for token in mode_tokens:
+            token_l = token.lower()
+            for path in candidates:
+                if token_l in os.path.basename(path).lower():
+                    return path
+
+        if gguf_mode == "gguf-f16":
+            return min(
+                candidates,
+                key=lambda p: (
+                    0 if ("f16" in os.path.basename(p).lower() or "fp16" in os.path.basename(p).lower()) else 1,
+                    -_quant_bits_from_name(p),
+                ),
+            )
+
+        target_bits = {
+            "gguf-q8": 8,
+            "gguf-q6": 6,
+            "gguf-q5": 5,
+            "gguf-q4": 4,
+            "gguf-q3": 3,
+            "gguf-q2": 2,
+        }.get(gguf_mode, 4)
+
+        return min(
+            candidates,
+            key=lambda p: (
+                abs(_quant_bits_from_name(p) - target_bits) if _quant_bits_from_name(p) else 99,
+                -_quant_bits_from_name(p),
+            ),
+        )
+
+    return default_path
+
+
+def get_last_gguf_selection() -> dict:
+    return dict(_LAST_GGUF_SELECTION)
+
+
+def _load_gguf_llamacpp(model_id: str, quant_mode: str):
+    try:
+        from llama_cpp import Llama, llama_supports_gpu_offload
+    except Exception as exc:
+        raise RuntimeError(
+            "llama-cpp-python is not installed. Install it in the backend venv to use GGUF modes."
+        ) from exc
+
+    gguf_path = resolve_gguf_variant_path(model_id, quant_mode)
+
+    if not gguf_path:
+        raise RuntimeError(
+            "GGUF path not provided. Set model_id='gguf:/absolute/path/model.gguf' or set "
+            "SPONGE_GGUF_PATH / SPONGE_GGUF_DIR in backend/.env"
+        )
+    if not os.path.isfile(gguf_path):
+        raise RuntimeError(f"GGUF file not found: {gguf_path}")
+
+    _LAST_GGUF_SELECTION["model_id"] = model_id
+    _LAST_GGUF_SELECTION["quant_mode"] = quant_mode
+    _LAST_GGUF_SELECTION["path"] = gguf_path
+
+    n_ctx = int(os.environ.get("SPONGE_GGUF_CTX", "4096"))
+    n_threads = int(os.environ.get("SPONGE_GGUF_THREADS", str(max(1, (os.cpu_count() or 8) // 2))))
+    n_gpu_layers = int(os.environ.get("SPONGE_GGUF_GPU_LAYERS", "-1"))
+
+    supports_offload = bool(llama_supports_gpu_offload())
+    if n_gpu_layers != 0 and not supports_offload:
+        logger.warning("⚠️  llama.cpp build has no GPU offload support; running GGUF on CPU.")
+        n_gpu_layers = 0
+
+    logger.info(f"⚙️  Loading GGUF via llama.cpp: {gguf_path}")
+    llm = Llama(
+        model_path=gguf_path,
+        n_ctx=n_ctx,
+        n_threads=n_threads,
+        n_gpu_layers=n_gpu_layers,
+        verbose=False,
+    )
+
+    tokenizer = GGUFTokenizerAdapter(llm)
+    model = GGUFModelAdapter(llm, n_ctx=n_ctx)
+    quant_label = quant_mode
+    device = "cuda" if supports_offload and n_gpu_layers != 0 else "cpu"
+
+    if device == "cuda":
+        logger.info("✅ Model ready — GGUF backend (GPU offload active).")
+    else:
+        logger.info("✅ Model ready — GGUF backend (CPU mode).")
+
+    return tokenizer, model, device, quant_label
+
+
+def cleanup_model(model, tokenizer=None):
+    """Release references and clear caches between runs."""
     import gc
 
-    if torch.cuda.is_available():
-        allocated_before = torch.cuda.memory_allocated() / 1024**3
-        logger.info(f"🧹 VRAM before cleanup: {allocated_before:.2f} GB allocated")
-
-    # 1. Remove accelerate dispatch hooks (they hold GPU tensor references)
     try:
-        from accelerate.hooks import remove_hook_from_module
-        remove_hook_from_module(model, recurse=True)
-    except (ImportError, Exception):
-        pass
-
-    # 2. Move every parameter/buffer to CPU individually
-    #    (model.cpu() can fail on dispatched models)
-    try:
-        for param in model.parameters():
-            param.data = param.data.cpu()
-            if param.grad is not None:
-                param.grad = param.grad.cpu()
-        for buf in model.buffers():
-            buf.data = buf.data.cpu()
+        llm = getattr(model, "llm", None)
+        if llm is not None and hasattr(llm, "reset"):
+            llm.reset()
     except Exception:
         pass
 
-    # 3. Try the normal .cpu() as well
-    try:
-        model.cpu()
-    except Exception:
-        pass
-
-    # 4. Delete references
     del model
     if tokenizer is not None:
         del tokenizer
 
-    # 5. Force garbage collection
     gc.collect()
-
-    # 6. Release VRAM back to the OS
     if torch.cuda.is_available():
-        torch.cuda.synchronize()
         torch.cuda.empty_cache()
-        if hasattr(torch.cuda, 'ipc_collect'):
-            torch.cuda.ipc_collect()
-        allocated_after = torch.cuda.memory_allocated() / 1024**3
-        logger.info(f"🧹 VRAM after cleanup: {allocated_after:.2f} GB allocated")
 
 
-# ── PyTorch Native Dynamic int8 quantization (Optimized for CPU) ──────────
+def load_model_and_tokenizer(model_id: str, quantize=False):
+    """Load only GGUF-based model variants.
 
-def _quantize_model_int8(model: nn.Module) -> nn.Module:
-    """Replace every nn.Linear in *model* with a heavily optimized int8 dynamic quantized version.
-    
-    This uses PyTorch's native dynamic quantization which uses optimized C++ backing
-    (FBGEMM/QNNPACK) and is significantly faster on CPUs than pure-python custom implementations.
+    Supported modes after normalization:
+      gguf-f16, gguf-q8, gguf-q6, gguf-q5, gguf-q4, gguf-q3, gguf-q2
     """
-    logger.info("⚙️ Applying PyTorch native dynamic int8 quantization (CPU optimized)...")
-    
-    # Needs to be explicitly imported to ensure backend availability
-    import torch.ao.quantization
-    
-    quantized_model = torch.ao.quantization.quantize_dynamic(
-        model, 
-        {nn.Linear}, 
-        dtype=torch.qint8
-    )
-    
-    logger.info("✅ Replaced Linear layers with PyTorch dynamic int8 quantized versions")
-    return quantized_model
+    quant_mode = _normalize_quant_mode(quantize)
+    supported_modes = set(GGUF_VARIANT_TOKENS.keys())
+    if quant_mode not in supported_modes:
+        quant_mode = "gguf-f16"
+    return _load_gguf_llamacpp(model_id, quant_mode)
 
-
-def _is_model_cached(model_id: str, hf_token=None) -> bool:
-    """Check if a model exists in the HuggingFace cache without making network requests."""
-    from huggingface_hub import try_to_load_from_cache, scan_cache_dir
-    try:
-        result = try_to_load_from_cache(model_id, "config.json", token=hf_token)
-        # Returns None if not cached, a path string if found
-        if result is not None and isinstance(result, str):
-            return True
-    except Exception:
-        pass
-
-    # Fallback: scan cache directory
-    try:
-        cache_info = scan_cache_dir()
-        for repo in cache_info.repos:
-            if repo.repo_id == model_id:
-                return True
-    except Exception:
-        pass
-
-    return False
-
-
-def load_model_and_tokenizer(model_id: str, quantize: bool = False):
-    """
-    Load a HuggingFace causal-LM and its tokenizer.
-
-    Supports regular models and on-the-fly bitsandbytes NF4 quantization.
-    Pass quantize=True to load in 4-bit.
-
-    Returns:
-        (tokenizer, model, device, quant_label)
-    """
-
-    # --- Log VRAM state before loading ---
-    if torch.cuda.is_available():
-        allocated = torch.cuda.memory_allocated() / 1024**3
-        reserved = torch.cuda.memory_reserved() / 1024**3
-        logger.info(f"🔧 VRAM state: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved")
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.float16 if device == "cuda" else torch.float32
-
-    # Log GPU/ROCm info
-    if device == "cuda":
-        gpu_name = torch.cuda.get_device_name(0)
-        hip_version = getattr(torch.version, 'hip', None)
-        if hip_version:
-            logger.info(f"🎮 GPU: {gpu_name} (ROCm/HIP {hip_version})")
-        else:
-            logger.info(f"🎮 GPU: {gpu_name} (CUDA {torch.version.cuda})")
-
-    logger.info(f"🔄 Checking model {model_id}...")
-
-    # Use HF_TOKEN env var for authenticated (faster) downloads
-    hf_token = os.environ.get("HF_TOKEN")
-
-    load_kwargs = {
-        "torch_dtype": dtype,
-        "device_map": "auto" if device == "cuda" else None,
-        "token": hf_token,
-    }
-
-    # NOTE: quantization is applied *after* loading (see below)
-
-    if _is_model_cached(model_id, hf_token):
-        logger.info(f"✅ Found {model_id} in local cache.")
-        tokenizer = AutoTokenizer.from_pretrained(model_id, local_files_only=True, token=hf_token)
-        model = AutoModelForCausalLM.from_pretrained(
-            model_id, local_files_only=True, **load_kwargs
-        )
-    else:
-        if not hf_token:
-            logger.warning("⚠️ No HF_TOKEN set — downloads will be slow! Set HF_TOKEN env var for faster downloads.")
-        logger.info(f"⬇️ Model {model_id} not found locally. Downloading...")
-        tokenizer = AutoTokenizer.from_pretrained(model_id, token=hf_token)
-        model = AutoModelForCausalLM.from_pretrained(model_id, **load_kwargs)
-        logger.info(f"✅ Download complete and model loaded.")
-
-    if getattr(tokenizer, "pad_token_id", None) is None:
-        tokenizer.pad_token_id = tokenizer.eos_token_id
-
-    if device == "cpu":
-        model.to(device)
-
-    # ── Post-load int8 quantization (pure PyTorch, any backend) ────────
-    if quantize:
-        logger.info("⚙️ Applying int8 per-channel weight quantization...")
-        model = _quantize_model_int8(model)
-        quant_label = "int8"
-        logger.info(f"✅ Model ready — int8 quantized.")
-    else:
-        quant_label = "fp16" if device == "cuda" else "fp32"
-        logger.info(f"✅ Model ready on {device.upper()} ({quant_label}).")
-
-    model.eval()
-    return tokenizer, model, device, quant_label
 
 def generate_text(model_id: str, prompt: str, max_new_tokens: int = -1):
-    """
-    Loads model and generates text based on prompt.
-    """
-    tokenizer, model, device, _quant_label = load_model_and_tokenizer(model_id)
+    tokenizer, model, _device, _quant_label = load_model_and_tokenizer(model_id)
 
     logger.info("🔄 Generating response...")
-    
-    # Encode input
+
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
     input_len = inputs.input_ids.shape[1]
 
-    # Determine max tokens if set to auto (-1)
     if max_new_tokens == -1:
-        # Try to find model's max context length
         model_max_length = getattr(model.config, "max_position_embeddings", None)
         if model_max_length is None:
-             model_max_length = getattr(model.config, "n_positions", None)
-        
-        # Fallback if unknown (common for some architectures)
-        if model_max_length is None:
-             model_max_length = 4096 # Safe modern default
-             logger.warning(f"⚠️ Could not detect model context length. Defaulting to {model_max_length}.")
-        
-        # Calculate remaining capacity
+            model_max_length = getattr(model.config, "n_positions", 4096)
         max_new_tokens = max(1, model_max_length - input_len)
-        logger.info(f"✨ Auto-setting max tokens to: {max_new_tokens} (Context: {model_max_length} - Prompt: {input_len})")
+        logger.info(f"✨ Auto-setting max tokens to: {max_new_tokens}")
 
-    # Generate
     with torch.no_grad():
         output = model.generate(
             **inputs,
-            max_new_tokens=max_new_tokens,  # Use the high limit we calculated
+            max_new_tokens=max_new_tokens,
             do_sample=True,
             temperature=0.7,
             top_p=0.9,
             pad_token_id=tokenizer.eos_token_id,
-            eos_token_id=tokenizer.eos_token_id  # Ensure model stops when "done"
+            eos_token_id=tokenizer.eos_token_id,
         )
 
-    # Decode and print ONLY the new tokens (stripping the prompt)
     generated_text = tokenizer.decode(output[0][input_len:], skip_special_tokens=True)
-    
-    print("\n" + "="*40)
+
+    print("\n" + "=" * 40)
     print(f"📝 Prompt: {prompt}")
     print("-" * 40)
     print(f"🤖 Response:\n{generated_text}")
-    print("="*40 + "\n")
+    print("=" * 40 + "\n")
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Simple local model loader and text generator.")
-    parser.add_argument("model_id", type=str, help="Path to local model or HF model ID")
+    parser = argparse.ArgumentParser(description="Local GGUF loader and text generator.")
+    parser.add_argument("model_id", type=str, help="GGUF file path or model id hint")
     parser.add_argument("prompt", type=str, help="Text prompt for generation")
     parser.add_argument("--max_tokens", type=int, default=-1, help="Max new tokens to generate (-1 for auto)")
 
     args = parser.parse_args()
-
     generate_text(args.model_id, args.prompt, args.max_tokens)
