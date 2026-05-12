@@ -35,6 +35,10 @@ const ResultCard = ({ title, result, tag }) => (
             <span className="metric-value">{result.input_tokens ?? '—'}</span>
           </div>
           <div className="metric-item">
+            <span className="metric-label">Input Chars</span>
+            <span className="metric-value">{result.input_chars ?? '—'}</span>
+          </div>
+          <div className="metric-item">
             <span className="metric-label">Output Tokens</span>
             <span className="metric-value">{result.output_tokens ?? '—'}</span>
           </div>
@@ -255,6 +259,9 @@ const SpongeAttack = () => {
             <option value="evolutionary">Evolutionary Sponge</option>
             <option value="context_exhaustion">Context Exhaustion</option>
             <option value="autodos">AutoDoS (Tree-based)</option>
+            <option value="token_busting">Token-Busting</option>
+            <option value="lingoloop">LingoLoop</option>
+            <option value="state_entrapment">State Entrapment</option>
           </select>
         </div>
         {attackType === 'evolutionary' ? (
@@ -268,7 +275,7 @@ const SpongeAttack = () => {
               <input type="number" className="control-input" value={population} onChange={e => setPopulation(parseInt(e.target.value))} disabled={anyRunning} min="2" />
             </div>
           </>
-        ) : attackType === 'context_exhaustion' ? (
+        ) : (attackType === 'context_exhaustion' || attackType === 'token_busting' || attackType === 'lingoloop' || attackType === 'state_entrapment') ? (
           <div className="control-group">
             <label className="control-label">Num Requests</label>
             <input type="number" className="control-input" value={numRequests} onChange={e => setNumRequests(parseInt(e.target.value))} disabled={anyRunning} min="1" />

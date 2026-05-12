@@ -9,6 +9,9 @@ import sys
 import os
 import random
 import gc
+import json
+import urllib.request
+import urllib.error
 
 try:
     from dotenv import load_dotenv
@@ -17,9 +20,6 @@ except Exception:
     # Backend still works if python-dotenv is not installed.
     pass
 
-# Tell the Linux OOM killer to target this process before other processes
-# (e.g. VS Code) when RAM runs out during large model loading.
-# Score 500 means "kill me first" — range is -1000 (never kill) to 1000 (always kill).
 try:
     with open("/proc/self/oom_score_adj", "w") as _f:
         _f.write("500")
@@ -31,9 +31,48 @@ sys.path.append(os.path.dirname(__file__))
 from evolutionary_sponge import run_sponge_attack
 from context_exhaustion import run_context_exhaustion
 from autodos_attack import run_autodos_attack
+from token_busting_attack import run_token_busting_attack
+from lingoloop_attack import run_lingoloop_attack
+from state_entrapment_attack import run_state_entrapment_attack
 from model import cleanup_model, resolve_gguf_variant_path, get_last_gguf_selection
 
 app = FastAPI()
+
+
+def _supabase_config():
+    url = os.environ.get("SUPABASE_URL", "").strip()
+    key = os.environ.get("SUPABASE_API_KEY", "").strip()
+    table = os.environ.get("SUPABASE_TABLE", "sponge_attack_runs").strip()
+    if not url or not key or not table:
+        return None
+    if url.endswith("/"):
+        url = url[:-1]
+    return {
+        "url": url,
+        "key": key,
+        "table": table,
+    }
+
+
+def _supabase_insert(payload: dict):
+    cfg = _supabase_config()
+    if not cfg:
+        return
+    body = json.dumps(payload).encode("utf-8")
+    headers = {
+        "apikey": cfg["key"],
+        "Authorization": f"Bearer {cfg['key']}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal",
+    }
+    endpoint = f"{cfg['url']}/rest/v1/{cfg['table']}"
+    req = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
+    try:
+        urllib.request.urlopen(req, timeout=10).read()
+    except urllib.error.HTTPError as exc:
+        print(f"[supabase] insert failed: {exc.code} {exc.reason}")
+    except Exception as exc:
+        print(f"[supabase] insert failed: {exc}")
 
 
 def _quant_mode_capabilities():
@@ -178,6 +217,28 @@ def sponge_attack_worker(
             attack_state["is_running"] = False
             attack_state["best_result"] = data.get("result")
             attack_state["logs"].append("Attack Complete!")
+            actual_quant_mode = get_last_gguf_selection().get("quant_mode") or quant_mode
+            payload = {
+                "attack_type": attack_type,
+                "model_id": model_id,
+                "quant_mode": actual_quant_mode,
+                "is_comparison": False,
+                "phase": "single",
+                "params": {
+                    "gens": gens,
+                    "pop": pop,
+                    "num_requests": num_requests,
+                    "autodos_iterations": autodos_iterations,
+                    "tree_depth": tree_depth,
+                    "tree_breadth": tree_breadth,
+                    "context_mode": context_mode,
+                    "force_decode_tokens": force_decode_tokens,
+                    "disable_eos_stop": disable_eos_stop,
+                },
+                "result": data.get("result"),
+                "logs": attack_state["logs"][-200:],
+            }
+            _supabase_insert(payload)
         else:
             # Generic status update
             msg = data.get("message", "")
@@ -213,7 +274,27 @@ def sponge_attack_worker(
                 is_quantized=quant_mode,
                 progress_callback=callback,
             )
-        
+        elif attack_type == "token_busting":
+            run_token_busting_attack(
+                model_id,
+                num_requests=num_requests,
+                is_quantized=quant_mode,
+                progress_callback=callback,
+            )        
+        elif attack_type == "lingoloop":
+            run_lingoloop_attack(
+                model_id,
+                num_requests=num_requests,
+                is_quantized=quant_mode,
+                progress_callback=callback,
+            )
+        elif attack_type == "state_entrapment":
+            run_state_entrapment_attack(
+                model_id,
+                num_requests=num_requests,
+                is_quantized=quant_mode,
+                progress_callback=callback,
+            )
     except Exception as e:
         attack_state["status"] = "error"
         attack_state["is_running"] = False
@@ -289,7 +370,7 @@ comparison_state = {
     "total_generations": 0,
 }
 
-def _make_comparison_callback(target_logs_key: str):
+def _make_comparison_callback(target_logs_key: str, meta: dict | None = None):
     """Return a progress callback that writes into comparison_state."""
     def callback(data):
         global comparison_state
@@ -318,6 +399,18 @@ def _make_comparison_callback(target_logs_key: str):
             key = "regular_result" if target_logs_key == "regular_logs" else "quantized_result"
             comparison_state[key] = data.get("result")
             comparison_state[target_logs_key].append("Phase complete!")
+            actual_quant_mode = get_last_gguf_selection().get("quant_mode") or (meta.get("quant_mode") if meta else None)
+            payload = {
+                "attack_type": meta.get("attack_type") if meta else None,
+                "model_id": meta.get("model_id") if meta else None,
+                "quant_mode": actual_quant_mode,
+                "is_comparison": True,
+                "phase": meta.get("phase") if meta else None,
+                "params": meta.get("params") if meta else None,
+                "result": data.get("result"),
+                "logs": comparison_state[target_logs_key][-200:],
+            }
+            _supabase_insert(payload)
         else:
             msg = data.get("message", "")
             if msg:
@@ -361,17 +454,36 @@ def comparison_worker(
         comparison_state["regular_logs"].append(f"═══ Phase 1/2: Model A ({model_id_a}) ═══")
         random.seed(seed)
         
+        regular_meta = {
+            "attack_type": attack_type,
+            "model_id": model_id_a,
+            "quant_mode": regular_quant_mode,
+            "phase": "regular",
+            "params": {
+                "gens": gens,
+                "pop": pop,
+                "num_requests": num_requests,
+                "autodos_iterations": autodos_iterations,
+                "tree_depth": tree_depth,
+                "tree_breadth": tree_breadth,
+                "context_mode": context_mode,
+                "force_decode_tokens": force_decode_tokens,
+                "disable_eos_stop": disable_eos_stop,
+                "seed": seed,
+            },
+        }
+
         if attack_type == "evolutionary":
             run_sponge_attack(
                 model_id_a, gens=gens, pop=pop, quantize=regular_quant_mode,
-                progress_callback=_make_comparison_callback("regular_logs"),
+                progress_callback=_make_comparison_callback("regular_logs", regular_meta),
             )
         elif attack_type == "context_exhaustion":
             run_context_exhaustion(
                 model_id_a,
                 num_requests=num_requests,
                 is_quantized=regular_quant_mode,
-                progress_callback=_make_comparison_callback("regular_logs"),
+                progress_callback=_make_comparison_callback("regular_logs", regular_meta),
                 context_mode=context_mode,
                 force_decode_tokens=force_decode_tokens,
                 disable_eos_stop=disable_eos_stop,
@@ -380,7 +492,22 @@ def comparison_worker(
             run_autodos_attack(
                 model_id_a, num_iterations=autodos_iterations,
                 depth=tree_depth, breadth=tree_breadth, is_quantized=regular_quant_mode,
-                progress_callback=_make_comparison_callback("regular_logs"),
+                progress_callback=_make_comparison_callback("regular_logs", regular_meta),
+            )
+        elif attack_type == "token_busting":
+            run_token_busting_attack(
+                model_id_a, num_requests=num_requests, is_quantized=regular_quant_mode,
+                progress_callback=_make_comparison_callback("regular_logs", regular_meta),
+            )
+        elif attack_type == "lingoloop":
+            run_lingoloop_attack(
+                model_id_a, num_requests=num_requests, is_quantized=regular_quant_mode,
+                progress_callback=_make_comparison_callback("regular_logs", regular_meta),
+            )
+        elif attack_type == "state_entrapment":
+            run_state_entrapment_attack(
+                model_id_a, num_requests=num_requests, is_quantized=regular_quant_mode,
+                progress_callback=_make_comparison_callback("regular_logs", regular_meta),
             )
         comparison_state["regular_gguf_path"] = get_last_gguf_selection().get("path")
 
@@ -401,17 +528,36 @@ def comparison_worker(
         )
         random.seed(seed)
         
+        quant_meta = {
+            "attack_type": attack_type,
+            "model_id": model_id_b,
+            "quant_mode": quant_mode,
+            "phase": "quantized",
+            "params": {
+                "gens": gens,
+                "pop": pop,
+                "num_requests": num_requests,
+                "autodos_iterations": autodos_iterations,
+                "tree_depth": tree_depth,
+                "tree_breadth": tree_breadth,
+                "context_mode": context_mode,
+                "force_decode_tokens": force_decode_tokens,
+                "disable_eos_stop": disable_eos_stop,
+                "seed": seed,
+            },
+        }
+
         if attack_type == "evolutionary":
             run_sponge_attack(
                 model_id_b, gens=gens, pop=pop, quantize=quant_mode,
-                progress_callback=_make_comparison_callback("quantized_logs"),
+                progress_callback=_make_comparison_callback("quantized_logs", quant_meta),
             )
         elif attack_type == "context_exhaustion":
             run_context_exhaustion(
                 model_id_b,
                 num_requests=num_requests,
                 is_quantized=quant_mode,
-                progress_callback=_make_comparison_callback("quantized_logs"),
+                progress_callback=_make_comparison_callback("quantized_logs", quant_meta),
                 context_mode=context_mode,
                 force_decode_tokens=force_decode_tokens,
                 disable_eos_stop=disable_eos_stop,
@@ -420,7 +566,22 @@ def comparison_worker(
             run_autodos_attack(
                 model_id_b, num_iterations=autodos_iterations,
                 depth=tree_depth, breadth=tree_breadth, is_quantized=quant_mode,
-                progress_callback=_make_comparison_callback("quantized_logs"),
+                progress_callback=_make_comparison_callback("quantized_logs", quant_meta),
+            )
+        elif attack_type == "token_busting":
+            run_token_busting_attack(
+                model_id_b, num_requests=num_requests, is_quantized=quant_mode,
+                progress_callback=_make_comparison_callback("quantized_logs", quant_meta),
+            )
+        elif attack_type == "lingoloop":
+            run_lingoloop_attack(
+                model_id_b, num_requests=num_requests, is_quantized=quant_mode,
+                progress_callback=_make_comparison_callback("quantized_logs", quant_meta),
+            )
+        elif attack_type == "state_entrapment":
+            run_state_entrapment_attack(
+                model_id_b, num_requests=num_requests, is_quantized=quant_mode,
+                progress_callback=_make_comparison_callback("quantized_logs", quant_meta),
             )
         comparison_state["quantized_gguf_path"] = get_last_gguf_selection().get("path")
 

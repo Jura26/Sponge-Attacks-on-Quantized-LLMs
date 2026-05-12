@@ -135,6 +135,15 @@ def _quant_bits_from_name(path: str) -> int:
     return 0
 
 
+def _quant_mode_from_path(path: str) -> str | None:
+    bits = _quant_bits_from_name(path)
+    if bits == 16:
+        return "gguf-f16"
+    if bits in (2, 3, 4, 5, 6, 8):
+        return f"gguf-q{bits}"
+    return None
+
+
 def _family_hint_from_path(path: str) -> str:
     stem = os.path.splitext(os.path.basename(path))[0].lower()
     stem = re.sub(r"[-_.]?(f16|fp16|fp32).*$", "", stem)
@@ -268,6 +277,10 @@ def _load_gguf_llamacpp(model_id: str, quant_mode: str):
         )
     if not os.path.isfile(gguf_path):
         raise RuntimeError(f"GGUF file not found: {gguf_path}")
+
+    detected_quant_mode = _quant_mode_from_path(gguf_path)
+    if detected_quant_mode and detected_quant_mode != quant_mode:
+        quant_mode = detected_quant_mode
 
     _LAST_GGUF_SELECTION["model_id"] = model_id
     _LAST_GGUF_SELECTION["quant_mode"] = quant_mode
