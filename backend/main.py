@@ -222,8 +222,6 @@ def sponge_attack_worker(
                 "attack_type": attack_type,
                 "model_id": model_id,
                 "quant_mode": actual_quant_mode,
-                "is_comparison": False,
-                "phase": "single",
                 "params": {
                     "gens": gens,
                     "pop": pop,
@@ -404,8 +402,6 @@ def _make_comparison_callback(target_logs_key: str, meta: dict | None = None):
                 "attack_type": meta.get("attack_type") if meta else None,
                 "model_id": meta.get("model_id") if meta else None,
                 "quant_mode": actual_quant_mode,
-                "is_comparison": True,
-                "phase": meta.get("phase") if meta else None,
                 "params": meta.get("params") if meta else None,
                 "result": data.get("result"),
                 "logs": comparison_state[target_logs_key][-200:],
