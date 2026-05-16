@@ -10,11 +10,11 @@ function App() {
       <Header />
       <main className="main-content">
         <div className="section-block">
-          <div className="section-label">System Overview</div>
+          <div className="section-label">Pregled sustava</div>
           <SystemStats />
         </div>
         <div className="section-block">
-          <div className="section-label">Sponge Attack Console</div>
+          <div className="section-label">Konzola napada</div>
           <SpongeAttack />
         </div>
       </main>

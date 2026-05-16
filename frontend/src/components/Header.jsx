@@ -9,7 +9,7 @@ const Header = () => {
   }, []);
   const pad = n => String(n).padStart(2, '0');
   const ts = `${pad(time.getHours())}:${pad(time.getMinutes())}:${pad(time.getSeconds())}`;
-  const date = time.toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' }).toUpperCase();
+  const date = time.toLocaleDateString('hr-HR', { month: 'short', day: '2-digit', year: 'numeric' }).toUpperCase();
 
   return (
     <header className="header">
@@ -25,9 +25,9 @@ const Header = () => {
               <line x1="1" y1="9" x2="4" y2="9" /><line x1="1" y1="14" x2="4" y2="14" />
             </svg>
           </div>
-          <span className="header-title">Sponge Attacks</span>
+          <span className="header-title">Sponge napadi</span>
           <span className="header-sep">/</span>
-          <span className="header-sub">Quantized LLMs</span>
+          <span className="header-sub">Kvantizirani LLM-ovi</span>
         </div>
         <div className="header-right">
           <div className="header-meta">

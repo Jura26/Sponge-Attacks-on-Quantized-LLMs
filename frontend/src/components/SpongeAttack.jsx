@@ -11,50 +11,80 @@ const ResultCard = ({ title, result, tag }) => (
       <div className="results-content">
         <div className="result-metrics">
           <div className="metric-item">
-            <span className="metric-label">Total Score</span>
+            <span className="metric-label">Ukupni rezultat</span>
             <span className="metric-value metric-value-primary">{result.score?.toFixed(4) ?? '—'}</span>
           </div>
           <div className="metric-item">
-            <span className="metric-label">Duration</span>
+            <span className="metric-label">{result.context_mode ? 'Ukupno trajanje (svi zahtjevi)' : 'Trajanje'}</span>
             <span className="metric-value">{result.duration?.toFixed(4) ?? '—'}s</span>
           </div>
+          {result.context_mode && (
+            <div className="metric-item">
+              <span className="metric-label">Nacin rada</span>
+              <span className="metric-value">{result.context_mode === 'prefill_only' ? 'Prefill only' : 'Combined'}</span>
+            </div>
+          )}
+          {typeof result.prefill_duration === 'number' && result.context_mode && (
+            <div className="metric-item">
+              <span className="metric-label">Prefill trajanje (najskuplji zahtjev)</span>
+              <span className="metric-value">{result.prefill_duration.toFixed(4)}s</span>
+            </div>
+          )}
+          {typeof result.decode_duration === 'number' && result.context_mode && (
+            <div className="metric-item">
+              <span className="metric-label">Decode trajanje (najskuplji zahtjev)</span>
+              <span className="metric-value">{result.decode_duration.toFixed(4)}s</span>
+            </div>
+          )}
+          {typeof result.avg_prefill_duration === 'number' && result.context_mode && (
+            <div className="metric-item">
+              <span className="metric-label">Prefill prosjek</span>
+              <span className="metric-value">{result.avg_prefill_duration.toFixed(4)}s</span>
+            </div>
+          )}
+          {typeof result.avg_decode_duration === 'number' && result.context_mode && (
+            <div className="metric-item">
+              <span className="metric-label">Decode prosjek</span>
+              <span className="metric-value">{result.avg_decode_duration.toFixed(4)}s</span>
+            </div>
+          )}
           {result.avg_power > 0 && (
             <div className="metric-item">
-              <span className="metric-label">Avg Power Draw</span>
+              <span className="metric-label">Prosjecna potrosnja snage</span>
               <span className="metric-value">{result.avg_power?.toFixed(1) ?? '—'}W</span>
             </div>
           )}
           {result.energy_joules > 0 && (
             <div className="metric-item">
-              <span className="metric-label">Energy Consumed</span>
+              <span className="metric-label">Potrosena energija</span>
               <span className="metric-value">{result.energy_joules?.toFixed(1) ?? '—'}J</span>
             </div>
           )}
           <div className="metric-item">
-            <span className="metric-label">Input Tokens</span>
+            <span className="metric-label">Ulazni tokeni</span>
             <span className="metric-value">{result.input_tokens ?? '—'}</span>
           </div>
           <div className="metric-item">
-            <span className="metric-label">Input Chars</span>
+            <span className="metric-label">Ulazni znakovi</span>
             <span className="metric-value">{result.input_chars ?? '—'}</span>
           </div>
           <div className="metric-item">
-            <span className="metric-label">Output Tokens</span>
+            <span className="metric-label">Izlazni tokeni</span>
             <span className="metric-value">{result.output_tokens ?? '—'}</span>
           </div>
         </div>
         <div className="result-data">
-          <label className="data-label">Trigger Prompt</label>
+          <label className="data-label">Ulazni prompt</label>
           <textarea readOnly value={result.prompt ?? ''} className="data-textarea" />
         </div>
         <div className="result-data">
-          <label className="data-label">Model Output</label>
+          <label className="data-label">Izlaz modela</label>
           <textarea readOnly value={result.output ?? ''} className="data-textarea data-textarea-output" />
         </div>
       </div>
     ) : (
       <div className="results-empty">
-        <p>Waiting…</p>
+        <p>Cekam…</p>
       </div>
     )}
   </div>
@@ -94,6 +124,7 @@ const SpongeAttack = () => {
   const [autoDoSIterations, setAutoDoSIterations] = useState(3);
   const [treeDepth, setTreeDepth] = useState(3);
   const [treeBreadth, setTreeBreadth] = useState(4);
+  const [contextMode, setContextMode] = useState('combined');
   const [quantCapabilities, setQuantCapabilities] = useState(null);
   const [availableModels, setAvailableModels] = useState([]);
 
@@ -101,9 +132,9 @@ const SpongeAttack = () => {
 
   // Models — prefer local GGUF files when available.
   const fallbackModels = [
-    { id: 'gpt2', label: 'GPT-2 (GGUF)', size: 'local', canQuantize: true },
-    { id: 'mistral7b', label: 'Mistral-7B (GGUF)', size: 'local', canQuantize: true },
-    { id: 'opt-6.7b', label: 'OPT-6.7B (GGUF)', size: 'local', canQuantize: true },
+    { id: 'gpt2', label: 'GPT-2 (GGUF)', size: 'lokalno', canQuantize: true },
+    { id: 'mistral7b', label: 'Mistral-7B (GGUF)', size: 'lokalno', canQuantize: true },
+    { id: 'opt-6.7b', label: 'OPT-6.7B (GGUF)', size: 'lokalno', canQuantize: true },
   ];
 
   const models = availableModels.length > 0 ? availableModels : fallbackModels;
@@ -169,7 +200,7 @@ const SpongeAttack = () => {
         const mapped = files.map(file => ({
           id: `gguf:${file.path}`,
           label: file.name,
-          size: file.size_gb != null ? `${file.size_gb} GB` : 'local',
+          size: file.size_gb != null ? `${file.size_gb} GB` : 'lokalno',
           canQuantize: true,
         }));
         setAvailableModels(mapped);
@@ -214,7 +245,7 @@ const SpongeAttack = () => {
     if (!hasQuantized) return;
     try {
       const res = await fetch(
-        `http://localhost:8000/api/attack/compare?model_id_a=${encodeURIComponent(selectedModelA)}&model_id_b=${encodeURIComponent(selectedModelB)}&gens=${generations}&pop=${population}&attack_type=${attackType}&num_requests=${numRequests}&autodos_iterations=${autoDoSIterations}&tree_depth=${treeDepth}&tree_breadth=${treeBreadth}`,
+        `http://localhost:8000/api/attack/compare?model_id_a=${encodeURIComponent(selectedModelA)}&model_id_b=${encodeURIComponent(selectedModelB)}&gens=${generations}&pop=${population}&attack_type=${attackType}&num_requests=${numRequests}&autodos_iterations=${autoDoSIterations}&tree_depth=${treeDepth}&tree_breadth=${treeBreadth}&context_mode=${encodeURIComponent(contextMode)}`,
         { method: 'POST' }
       );
       if (res.ok) {
@@ -226,7 +257,7 @@ const SpongeAttack = () => {
         setQuantizedLogs([]);
       } else {
         const e = await res.json();
-        alert(`Error: ${e.error || 'Failed to start comparison'}`);
+        alert(`Greska: ${e.error || 'Neuspjelo pokretanje usporedbe'}`);
       }
     } catch (e) { console.error(e); }
   };
@@ -242,56 +273,67 @@ const SpongeAttack = () => {
       {/* Controls */}
       <div className="attack-controls">
         <div className="control-group">
-          <label className="control-label">Model Under Test (A)</label>
+          <label className="control-label">Model u testu (A)</label>
           <select className="control-input" value={selectedModelA} onChange={e => setSelectedModelA(e.target.value)} disabled={anyRunning}>
             {models.map(m => <option key={m.id} value={m.id}>{m.label} ({m.size})</option>)}
           </select>
         </div>
         <div className="control-group">
-          <label className="control-label">Model Under Test (B)</label>
+          <label className="control-label">Model u testu (B)</label>
           <select className="control-input" value={selectedModelB} onChange={e => setSelectedModelB(e.target.value)} disabled={anyRunning}>
             {models.map(m => <option key={m.id} value={m.id}>{m.label} ({m.size})</option>)}
           </select>
         </div>
         <div className="control-group">
-          <label className="control-label">Attack Scenario</label>
+          <label className="control-label">Scenarij napada</label>
           <select className="control-input" value={attackType} onChange={e => setAttackType(e.target.value)} disabled={anyRunning}>
-            <option value="evolutionary">Evolutionary Sponge</option>
-            <option value="context_exhaustion">Context Exhaustion</option>
-            <option value="autodos">AutoDoS (Tree-based)</option>
-            <option value="token_busting">Token-Busting</option>
+            <option value="evolutionary">Evolucijski Sponge</option>
+            <option value="context_exhaustion">Iscrpljivanje konteksta</option>
+            <option value="autodos">AutoDoS (stablom)</option>
+            <option value="token_busting">Razbijanje tokena</option>
             <option value="lingoloop">LingoLoop</option>
-            <option value="state_entrapment">State Entrapment</option>
+            <option value="state_entrapment">Zarobljavanje stanja</option>
           </select>
         </div>
         {attackType === 'evolutionary' ? (
           <>
             <div className="control-group">
-              <label className="control-label">Generations</label>
+              <label className="control-label">Generacije</label>
               <input type="number" className="control-input" value={generations} onChange={e => setGenerations(parseInt(e.target.value))} disabled={anyRunning} min="1" />
             </div>
             <div className="control-group">
-              <label className="control-label">Population</label>
+              <label className="control-label">Populacija</label>
               <input type="number" className="control-input" value={population} onChange={e => setPopulation(parseInt(e.target.value))} disabled={anyRunning} min="2" />
             </div>
           </>
         ) : (attackType === 'context_exhaustion' || attackType === 'token_busting' || attackType === 'lingoloop' || attackType === 'state_entrapment') ? (
-          <div className="control-group">
-            <label className="control-label">Num Requests</label>
-            <input type="number" className="control-input" value={numRequests} onChange={e => setNumRequests(parseInt(e.target.value))} disabled={anyRunning} min="1" />
-          </div>
+          <>
+            <div className="control-group">
+              <label className="control-label">Broj zahtjeva</label>
+              <input type="number" className="control-input" value={numRequests} onChange={e => setNumRequests(parseInt(e.target.value))} disabled={anyRunning} min="1" />
+            </div>
+            {attackType === 'context_exhaustion' && (
+              <div className="control-group">
+                <label className="control-label">Nacin rada (sto mjerimo)</label>
+                <select className="control-input" value={contextMode} onChange={e => setContextMode(e.target.value)} disabled={anyRunning}>
+                  <option value="combined">Combined (prefill + decode, end-to-end)</option>
+                  <option value="prefill_only">Prefill only (izolira pritisak konteksta)</option>
+                </select>
+              </div>
+            )}
+          </>
         ) : (
           <>
             <div className="control-group">
-              <label className="control-label">Iterations</label>
+              <label className="control-label">Iteracije</label>
               <input type="number" className="control-input" value={autoDoSIterations} onChange={e => setAutoDoSIterations(parseInt(e.target.value))} disabled={anyRunning} min="1" />
             </div>
             <div className="control-group">
-              <label className="control-label">Tree Depth</label>
+              <label className="control-label">Dubina stabla</label>
               <input type="number" className="control-input" value={treeDepth} onChange={e => setTreeDepth(parseInt(e.target.value))} disabled={anyRunning} min="1" max="10" />
             </div>
             <div className="control-group">
-              <label className="control-label">Tree Breadth</label>
+              <label className="control-label">Sirina stabla</label>
               <input type="number" className="control-input" value={treeBreadth} onChange={e => setTreeBreadth(parseInt(e.target.value))} disabled={anyRunning} min="1" max="10" />
             </div>
           </>
@@ -302,13 +344,13 @@ const SpongeAttack = () => {
           disabled={anyRunning || !hasQuantized || !isModeSupported('gguf-f16')}
           title={
             !hasQuantized
-              ? 'Quantized comparison not available'
+              ? 'Kvantizirana usporedba nije dostupna'
               : !isModeSupported('gguf-f16')
                 ? modeReason('gguf-f16')
-                : `Compare ${selectedModelObjA?.label || 'Model A'} vs ${selectedModelObjB?.label || 'Model B'}`
+                : `Usporedi ${selectedModelObjA?.label || 'Model A'} i ${selectedModelObjB?.label || 'Model B'}`
           }
         >
-          {isComparing ? <><span className="btn-spinner" />Comparing A vs B...</> : 'Run A/B Comparison'}
+          {isComparing ? <><span className="btn-spinner" />Usporedujem A i B...</> : 'Pokreni A/B usporedbu'}
         </button>
       </div>
 
@@ -320,12 +362,12 @@ const SpongeAttack = () => {
             <div className="attack-status-left">
               <span className={`attack-status-indicator ${compareStatusClass}`} />
               <span className="attack-status-label">
-                {comparePhase === 'regular' && `PHASE 1/2 — ${selectedModelObjA?.label || 'MODEL A'}`}
-                {comparePhase === 'quantized' && `PHASE 2/2 — ${selectedModelObjB?.label || 'MODEL B'}`}
-                {comparePhase === 'complete' && 'COMPARISON COMPLETE'}
-                {comparePhase === 'queued' && 'QUEUED'}
-                {comparePhase === 'error' && 'ERROR'}
-                {comparePhase === 'idle' && 'IDLE'}
+                {comparePhase === 'regular' && `FAZA 1/2 — ${selectedModelObjA?.label || 'MODEL A'}`}
+                {comparePhase === 'quantized' && `FAZA 2/2 — ${selectedModelObjB?.label || 'MODEL B'}`}
+                {comparePhase === 'complete' && 'USPOREDBA ZAVRSENA'}
+                {comparePhase === 'queued' && 'U REDU CEKANJA'}
+                {comparePhase === 'error' && 'GRESKA'}
+                {comparePhase === 'idle' && 'MIROVANJE'}
               </span>
             </div>
             <span className="attack-status-score compare-legend">A = Model A, B = Model B</span>
@@ -337,11 +379,11 @@ const SpongeAttack = () => {
               <div className="terminal-dots">
                 <span className="dot dot-red" /><span className="dot dot-yellow" /><span className="dot dot-green" />
               </div>
-              <span className="terminal-title">Comparison Log</span>
+              <span className="terminal-title">Dnevnik usporedbe</span>
             </div>
             <div className="terminal-body" ref={compareTerminalRef}>
               {compareLogs.length === 0 ? (
-                <div className="terminal-empty"><span className="terminal-prompt">$</span>Waiting for comparison to start...</div>
+                <div className="terminal-empty"><span className="terminal-prompt">$</span>Cekam pocetak usporedbe...</div>
               ) : (
                 compareLogs.map((log, i) => (
                   <div key={i} className="terminal-line">
@@ -356,15 +398,15 @@ const SpongeAttack = () => {
           {/* Delta badges */}
           {regularResult && quantizedResult && (
             <div className="delta-row">
-              <div className="delta-caption">Delta shown as B vs A</div>
-              <DeltaBadge label="Score" regular={regularResult.score} quantized={quantizedResult.score} />
-              <DeltaBadge label="Duration" regular={regularResult.duration} quantized={quantizedResult.duration} />
+              <div className="delta-caption">Delta prikazana kao B prema A</div>
+              <DeltaBadge label="Rezultat" regular={regularResult.score} quantized={quantizedResult.score} />
+              <DeltaBadge label="Trajanje" regular={regularResult.duration} quantized={quantizedResult.duration} />
             
               {regularResult.avg_power > 0 && (
-                <DeltaBadge label="Power Draw" regular={regularResult.avg_power} quantized={quantizedResult.avg_power} />
+                <DeltaBadge label="Potrosnja snage" regular={regularResult.avg_power} quantized={quantizedResult.avg_power} />
               )}
               {regularResult.energy_joules > 0 && (
-                <DeltaBadge label="Energy (J)" regular={regularResult.energy_joules} quantized={quantizedResult.energy_joules} />
+                <DeltaBadge label="Energija (J)" regular={regularResult.energy_joules} quantized={quantizedResult.energy_joules} />
               )}
             </div>
           )}

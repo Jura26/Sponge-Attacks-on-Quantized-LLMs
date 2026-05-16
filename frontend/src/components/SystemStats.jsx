@@ -17,7 +17,7 @@ const SystemStats = () => {
     const fetchStats = async () => {
       try {
         const res = await fetch('http://localhost:8000/api/stats');
-        if (!res.ok) throw new Error('Network response was not ok');
+        if (!res.ok) throw new Error('Mrezni odgovor nije u redu');
         setStats(await res.json());
         setError(null);
       } catch (err) { setError(err.message); }
@@ -47,9 +47,9 @@ const SystemStats = () => {
         <Ico><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></Ico>
       </div>
       <div>
-        <p className="stats-error-title">BACKEND UNREACHABLE</p>
+        <p className="stats-error-title">BACKEND NIJE DOSTUPAN</p>
         <p className="stats-error-desc">{error}</p>
-        <p className="stats-error-hint">Start main.py on port 8000 to connect.</p>
+        <p className="stats-error-hint">Pokreni main.py na portu 8000 za povezivanje.</p>
       </div>
     </div>
   );
@@ -57,7 +57,7 @@ const SystemStats = () => {
   if (!stats) return (
     <div className="stats-loading">
       <div className="loading-spinner" />
-      Connecting to backend...
+      Povezujem se s backendom...
     </div>
   );
 
@@ -116,7 +116,7 @@ const SystemStats = () => {
           <div className="card-header">
             <div className="card-header-left">
               <Ico><path d="M6 19v-8a6 6 0 0 1 12 0v8"/><rect x="2" y="19" width="20" height="2" rx="1"/></Ico>
-              <h3>Memory</h3>
+              <h3>Memorija</h3>
             </div>
             <span className="card-badge">{stats.memory_percent}%</span>
           </div>
@@ -138,7 +138,7 @@ const SystemStats = () => {
             </div>
             <span className="card-badge">{stats.disk_percent}%</span>
           </div>
-          <p className="card-value">{fmtBytes(stats.disk_free)} <span className="card-value-dim">free</span></p>
+          <p className="card-value">{fmtBytes(stats.disk_free)} <span className="card-value-dim">slobodno</span></p>
           <div className="progress-bar">
             <div className="progress-fill" style={{ width: `${stats.disk_percent}%`, backgroundColor: 'var(--amber)' }} />
           </div>
@@ -151,7 +151,7 @@ const SystemStats = () => {
           <div className="card-header" style={{ marginBottom: 0 }}>
             <div className="card-header-left">
               <Ico><rect x="1" y="6" width="18" height="12" rx="2"/><line x1="23" y1="13" x2="23" y2="11"/></Ico>
-              <h3>Battery</h3>
+              <h3>Baterija</h3>
             </div>
             <div className="battery-row">
               <div className="battery-visual">
@@ -162,9 +162,9 @@ const SystemStats = () => {
               </div>
               <span className="battery-percent">{Math.round(stats.battery.percent)}%</span>
               {!stats.battery.power_plugged && stats.battery.secsleft > 0 && (
-                <span className="battery-time">{fmtTime(stats.battery.secsleft)} remaining</span>
+                <span className="battery-time">{fmtTime(stats.battery.secsleft)} preostalo</span>
               )}
-              {stats.battery.power_plugged && <span className="card-badge card-badge-success">Charging</span>}
+              {stats.battery.power_plugged && <span className="card-badge card-badge-success">Puni se</span>}
             </div>
           </div>
         </div>
@@ -175,9 +175,9 @@ const SystemStats = () => {
         <button className="thermal-toggle" onClick={() => setThermalOpen(o => !o)}>
           <div className="card-header-left">
             <Ico><path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/></Ico>
-            <h3>Thermal Sensors</h3>
+            <h3>Termalni senzori</h3>
             {thermalReadings.length > 0 && (
-              <span className="thermal-count">{thermalReadings.length} sensors</span>
+              <span className="thermal-count">{thermalReadings.length} senzora</span>
             )}
           </div>
           <span className="thermal-chevron" style={{ transform: thermalOpen ? 'rotate(180deg)' : 'rotate(0deg)' }}>
@@ -189,20 +189,20 @@ const SystemStats = () => {
 
         {thermalOpen && (
           <>
-            {stats.temperatures?.error && <p className="temp-error">Could not read: {stats.temperatures.error}</p>}
+            {stats.temperatures?.error && <p className="temp-error">Ne mogu ocitati: {stats.temperatures.error}</p>}
             {stats.temperatures?._hint && <p className="temp-hint">{stats.temperatures._hint}</p>}
             {thermalReadings.length === 0 && !stats.temperatures?.error && (
-              <p className="temp-empty">No sensors detected.</p>
+              <p className="temp-empty">Nema detektiranih senzora.</p>
             )}
             {thermalReadings.length > 0 && (
               <div className="thermal-table-wrap">
                 <table className="thermal-table">
                   <thead>
                     <tr>
-                      <th>Sensor</th>
-                      <th>Label</th>
+                      <th>Senzor</th>
+                      <th>Oznaka</th>
                       <th>Temp</th>
-                      <th>Max</th>
+                      <th>Maks</th>
                     </tr>
                   </thead>
                   <tbody>
