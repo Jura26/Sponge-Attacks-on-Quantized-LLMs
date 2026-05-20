@@ -3,8 +3,30 @@ import psutil
 import time
 import torch
 import random
-from model import load_model_and_tokenizer, cleanup_model
+import os
+import logging
+import traceback
+from model import load_model_and_tokenizer, cleanup_model, tokenize_for_attack
 from evolutionary_sponge import SystemMonitor
+
+logger = logging.getLogger(__name__)
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _context_target_override(context_limit: int) -> int | None:
+    raw = os.environ.get("SPONGE_CONTEXT_TARGET_TOKENS", "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    if value <= 0:
+        return None
+    return min(value, max(1, context_limit))
 
 
 def _estimate_safe_target_seq_len(model, device: str, context_limit: int) -> int:
@@ -72,19 +94,34 @@ def run_context_exhaustion(
                 )
             })
         
-        quant_mode = is_quantized if isinstance(is_quantized, str) else ("bnb-nf4" if is_quantized else "none")
-        tokenizer, model, device, quant_label = load_model_and_tokenizer(model_id, quantize=quant_mode)
+        quant_mode = is_quantized if isinstance(is_quantized, str) else ("gguf-q4" if is_quantized else "none")
         
-        # Determine model context max window
-        context_limit = getattr(model.config, "max_position_embeddings", None)
-        if context_limit is None:
-            context_limit = getattr(model.config, "n_positions", 1024)
-            
+        tokenizer, model, device, quant_label = load_model_and_tokenizer(model_id, quantize=quant_mode)
+
+        # Force context cap regardless of load path
+        MAX_CONTEXT_OVERRIDE = int(os.environ.get("SPONGE_MAX_CONTEXT", 0))
+        AUTO_CAP = 16384
+        native_ctx = getattr(model.config, "max_position_embeddings", 4096)
+        if MAX_CONTEXT_OVERRIDE > 0:
+            model.config.max_position_embeddings = MAX_CONTEXT_OVERRIDE
+        elif native_ctx > AUTO_CAP:
+            model.config.max_position_embeddings = AUTO_CAP
+    
+        context_limit = getattr(model.config, "max_position_embeddings", 1024)
+
         if progress_callback:
             progress_callback({"status": "running", "message": f"Context window limit: {context_limit} tokens"})
 
-        # Target sequence length (VRAM-aware on GPU).
-        target_seq_len = _estimate_safe_target_seq_len(model, device, context_limit)
+        disable_oom_retry = _env_flag("SPONGE_CONTEXT_DISABLE_OOM_RETRY")
+        target_override = _context_target_override(context_limit)
+
+        # Target sequence length (VRAM-aware on GPU unless disabled).
+        if target_override is not None:
+            target_seq_len = target_override
+        elif disable_oom_retry:
+            target_seq_len = max(50, context_limit - 256)
+        else:
+            target_seq_len = _estimate_safe_target_seq_len(model, device, context_limit)
         if progress_callback:
             progress_callback({"status": "running", "message": f"Targeting inputs of length: {target_seq_len} tokens..."})
 
@@ -107,12 +144,19 @@ def run_context_exhaustion(
             monitor = SystemMonitor(device="cuda" if "cuda" in str(device) else "cpu")
             monitor.start()
 
-            for attempt in range(5):
+            attempts = 1 if disable_oom_retry else 5
+            for attempt in range(attempts):
                 try:
                     # Generate purely valid ASCII text to prevent detokenization expansion & invalid unicode errors
                     # Generate more than enough chars, then truncate to the exact token limit
                     base_text = "".join(random.choices("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ", k=effective_target * 5))
-                    input_ids = tokenizer(base_text, truncation=True, max_length=effective_target).input_ids.to(device)
+                    input_ids = tokenize_for_attack(
+                        tokenizer,
+                        base_text,
+                        device,
+                        truncation=True,
+                        max_length=effective_target,
+                    ).input_ids
                     
                     # Pad if for some reason it's shorter than expected
                     if input_ids.shape[1] < effective_target:
@@ -123,9 +167,12 @@ def run_context_exhaustion(
 
                     # Phase A: prefill-only forward pass (context pressure source)
                     prefill_start = time.perf_counter()
+                    # Create attention mask to prevent attention warning with pad_token_id=eos_token_id
+                    attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=device)
                     with torch.no_grad():
                         prefill_out = model(
                             input_ids=input_ids,
+                            attention_mask=attention_mask,
                             use_cache=True,
                             return_dict=True,
                         )
@@ -151,9 +198,10 @@ def run_context_exhaustion(
                         with torch.no_grad():
                             out = model.generate(
                                 input_ids,
+                                attention_mask=attention_mask,
                                 min_new_tokens=min_new_tokens,
                                 max_new_tokens=max_new_tokens,
-                                do_sample=False,
+                                do_sample=False,  # Greedy decoding (fastest, deterministic)
                                 use_cache=True,
                                 eos_token_id=eos_token_id,
                                 pad_token_id=tokenizer.eos_token_id,
@@ -172,6 +220,10 @@ def run_context_exhaustion(
                 except Exception as e:
                     msg = str(e)
                     is_oom = "out of memory" in msg.lower() or "hip out of memory" in msg.lower() or "llama_decode returned 1" in msg.lower() or "context" in msg.lower()
+                    if disable_oom_retry:
+                        error_msg = msg
+                        generated_text = f"Error: {error_msg}"
+                        break
                     if not is_oom or effective_target <= 512 or attempt == 4:
                         error_msg = msg
                         generated_text = f"Error: {error_msg}"
@@ -296,6 +348,18 @@ def run_context_exhaustion(
         return final_result
 
     except Exception as e:
+        tb = traceback.format_exc()
+        logger.error("Context exhaustion failed:\n%s", tb)
         if progress_callback:
-            progress_callback({"status": "error", "message": f"Fatal string error: {str(e)}"})
+            debug_tb = os.environ.get("SPONGE_DEBUG_TRACEBACK", "").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            if debug_tb:
+                msg = f"Fatal error: {str(e)}\n{tb}"
+            else:
+                msg = f"Fatal error: {str(e)} (set SPONGE_DEBUG_TRACEBACK=1 for traceback)"
+            progress_callback({"status": "error", "message": msg})
         return None

@@ -373,6 +373,10 @@ def evaluate_population(population, model, tokenizer, device, progress_callback=
             inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=max_input_len).to(device)
             input_len = inputs.input_ids.shape[1]
             
+            # Ensure attention_mask is included to prevent warning with pad_token_id=eos_token_id
+            if "attention_mask" not in inputs:
+                inputs["attention_mask"] = torch.ones_like(inputs.input_ids)
+            
             # Calculate remaining space and ensure we generate at least something
             remaining_context = model_max_length - input_len
             safe_max_new_tokens = max(1, remaining_context - 1)
@@ -383,7 +387,7 @@ def evaluate_population(population, model, tokenizer, device, progress_callback=
                 output = model.generate(
                     **inputs,
                     max_new_tokens=safe_max_new_tokens, 
-                    do_sample=True,
+                    do_sample=False,  # Greedy decoding for stability
                 )
                 generated_tokens = len(output[0]) - input_len
                 generated_text = tokenizer.decode(output[0][input_len:], skip_special_tokens=True)
@@ -426,7 +430,7 @@ def evaluate_population(population, model, tokenizer, device, progress_callback=
     return scores
 
 def run_sponge_attack(model_id, gens=5, pop=10, quantize=False, progress_callback=None):
-    quant_mode = quantize if isinstance(quantize, str) else ("bnb-nf4" if quantize else "none")
+    quant_mode = quantize if isinstance(quantize, str) else ("gguf-q4" if quantize else "none")
     quant_str = f" ({quant_mode})" if quant_mode != "none" else ""
     if progress_callback: progress_callback({"status": "starting", "message": f"Starting Sponge Attack GA on {model_id}{quant_str}"})
     print(f"Starting Sponge Attack GA on {model_id}{quant_str}")

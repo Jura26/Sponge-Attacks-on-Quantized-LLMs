@@ -1,0 +1,14 @@
+# Optional ROCm stack for PyTorch + GPTQ inference (AMD GPU).
+# Install after base requirements and ROCm PyTorch wheels:
+#
+#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.3
+#   pip install -r requirements.txt
+#   pip install -r requirements-rocm.txt
+#
+# Or run: bash ../scripts/install_gptq_rocm.sh
+
+transformers>=5.0
+accelerate>=1.0
+gptqmodel>=6.1.0
+sentencepiece
+protobuf

@@ -3,4 +3,4 @@ uvicorn[standard]
 psutil
 torch
 llama-cpp-python
- python-dotenv
+python-dotenv

@@ -148,7 +148,7 @@ def run_autodos_attack(
                 ),
             })
 
-        quant_mode = is_quantized if isinstance(is_quantized, str) else ("bnb-nf4" if is_quantized else "none")
+        quant_mode = is_quantized if isinstance(is_quantized, str) else ("gguf-q4" if is_quantized else "none")
         tokenizer, model, device, quant_label = load_model_and_tokenizer(
             model_id, quantize=quant_mode
         )
@@ -230,13 +230,15 @@ def run_autodos_attack(
             error_msg = None
 
             try:
+                # Ensure attention_mask is included to prevent warning with pad_token_id=eos_token_id
+                if "attention_mask" not in inputs:
+                    inputs["attention_mask"] = torch.ones_like(inputs.input_ids)
+                
                 with torch.no_grad():
                     out = model.generate(
                         **inputs,
                         max_new_tokens=actual_max_gen,
-                        do_sample=True,
-                        temperature=0.9,
-                        top_p=0.95,
+                        do_sample=False,  # Greedy decoding for stability and speed
                         pad_token_id=tokenizer.eos_token_id,
                     )
                 output_tokens = out.shape[1] - input_len

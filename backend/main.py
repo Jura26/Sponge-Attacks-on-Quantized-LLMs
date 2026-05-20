@@ -34,7 +34,8 @@ from autodos_attack import run_autodos_attack
 from token_busting_attack import run_token_busting_attack
 from lingoloop_attack import run_lingoloop_attack
 from state_entrapment_attack import run_state_entrapment_attack
-from model import cleanup_model, resolve_gguf_variant_path, get_last_gguf_selection
+from model import cleanup_model, resolve_gguf_variant_path, get_last_gguf_selection, gptq_available
+from model_catalog import build_model_catalog, resolve_attack_target
 
 app = FastAPI()
 
@@ -138,12 +139,26 @@ def _quant_mode_capabilities():
     except Exception:
         pass
 
+    gptq_id = os.environ.get("SPONGE_GPTQ_MODEL_ID", "").strip()
+    modes["gptq"] = {
+        "supported": bool(gptq_available() and gpu_available and gptq_id),
+        "reason": "GPTQ via GPTQModel on GPU (set SPONGE_GPTQ_MODEL_ID)",
+    }
+    if gptq_available() and gpu_available and not gptq_id:
+        modes["gptq"]["reason"] = "Set SPONGE_GPTQ_MODEL_ID to a Hugging Face GPTQ repo"
+    elif not gptq_available():
+        modes["gptq"]["reason"] = "Install GPTQModel: bash scripts/install_gptq_rocm.sh"
+    elif not gpu_available:
+        modes["gptq"]["reason"] = "GPTQ GPU path needs ROCm/CUDA visible to PyTorch"
+
     return {
         "gpu_available": gpu_available,
         "gpu_name": gpu_name,
         "rocm_arch": rocm_arch,
         "hip_version": hip_version,
         "gguf_gpu_offload": gguf_gpu_offload,
+        "gptq_available": gptq_available(),
+        "gptq_model_id": gptq_id or None,
         "modes": modes,
     }
 
@@ -427,13 +442,18 @@ def comparison_worker(
     tree_breadth: int = 4,
     regular_quant_mode: str = "gguf-f16",
     quant_mode: str = "gguf-q4",
+    phase_a_display: str | None = None,
+    phase_b_display: str | None = None,
     context_mode: str = "combined",
     force_decode_tokens: int = 64,
     disable_eos_stop: bool = False,
 ):
-    """Run the sponge attack twice: GGUF F16 baseline, then GGUF quantized variant."""
+    """Run the sponge attack twice: phase A config, then phase B config."""
     global comparison_state
     import torch
+
+    label_a = phase_a_display or f"{model_id_a} ({regular_quant_mode})"
+    label_b = phase_b_display or f"{model_id_b} ({quant_mode})"
 
     try:
         # Free memory before first run
@@ -447,7 +467,7 @@ def comparison_worker(
         # ── Phase 1: Regular (fp16) ──
         comparison_state["phase"] = "regular"
         comparison_state["regular_gguf_path"] = resolve_gguf_variant_path(model_id_a, regular_quant_mode)
-        comparison_state["regular_logs"].append(f"═══ Phase 1/2: Model A ({model_id_a}) ═══")
+        comparison_state["regular_logs"].append(f"═══ Phase 1/2: {label_a} ═══")
         random.seed(seed)
         
         regular_meta = {
@@ -519,9 +539,7 @@ def comparison_worker(
         comparison_state["phase"] = "quantized"
         comparison_state["current_generation"] = 0
         comparison_state["quantized_gguf_path"] = resolve_gguf_variant_path(model_id_b, quant_mode)
-        comparison_state["quantized_logs"].append(
-            f"═══ Phase 2/2: Model B ({model_id_b}) ═══"
-        )
+        comparison_state["quantized_logs"].append(f"═══ Phase 2/2: {label_b} ═══")
         random.seed(seed)
         
         quant_meta = {
@@ -591,12 +609,36 @@ def comparison_worker(
         comparison_state[target].append(f"Error: {str(e)}")
 
 
+def _resolve_compare_phase(
+    family: str | None,
+    backend: str | None,
+    gguf_variant: str | None,
+    fallback_model_id: str,
+    fallback_quant_mode: str,
+):
+    if family:
+        target = resolve_attack_target(family, backend or "gguf", gguf_variant)
+        return (
+            target["model_id"],
+            target["quant_mode"],
+            target["display"],
+            target.get("gguf_path"),
+        )
+    return fallback_model_id, fallback_quant_mode, f"{fallback_model_id} ({fallback_quant_mode})", None
+
+
 @app.post("/api/attack/compare")
 def start_comparison(
     background_tasks: BackgroundTasks,
-    model_id: str = "facebook/opt-2.7b",
+    model_id: str = "mistral7b",
     model_id_a: str | None = None,
     model_id_b: str | None = None,
+    model_family_a: str | None = None,
+    model_family_b: str | None = None,
+    phase_a_backend: str = "gguf",
+    phase_a_gguf_variant: str = "f16",
+    phase_b_backend: str = "gguf",
+    phase_b_gguf_variant: str = "q4_k_m",
     gens: int = 5,
     pop: int = 10,
     attack_type: str = "evolutionary",
@@ -604,8 +646,8 @@ def start_comparison(
     autodos_iterations: int = 3,
     tree_depth: int = 3,
     tree_breadth: int = 4,
-    regular_quant_mode: str = "gguf-f16",
-    quant_mode: str = "gguf-q4",
+    regular_quant_mode: str | None = None,
+    quant_mode: str | None = None,
     context_mode: str = "combined",
     force_decode_tokens: int = 64,
     disable_eos_stop: bool = False,
@@ -616,8 +658,31 @@ def start_comparison(
 
     seed = random.randint(0, 2**31)
 
-    resolved_a = model_id_a or model_id
-    resolved_b = model_id_b or model_id
+    legacy_a = model_id_a or model_id
+    legacy_b = model_id_b or model_id
+
+    try:
+        if model_family_a:
+            resolved_a, mode_a, display_a, path_a = _resolve_compare_phase(
+                model_family_a, phase_a_backend, phase_a_gguf_variant, legacy_a, "gguf-f16"
+            )
+        else:
+            mode_a = regular_quant_mode or "gguf-f16"
+            resolved_a = legacy_a
+            display_a = f"{legacy_a} ({mode_a})"
+            path_a = resolve_gguf_variant_path(resolved_a, mode_a)
+
+        if model_family_b:
+            resolved_b, mode_b, display_b, path_b = _resolve_compare_phase(
+                model_family_b, phase_b_backend, phase_b_gguf_variant, legacy_b, "gguf-q4"
+            )
+        else:
+            mode_b = quant_mode or "gguf-q4"
+            resolved_b = legacy_b
+            display_b = f"{legacy_b} ({mode_b})"
+            path_b = resolve_gguf_variant_path(resolved_b, mode_b)
+    except Exception as exc:
+        return {"error": str(exc)}
 
     comparison_state = {
         "is_running": True,
@@ -628,8 +693,10 @@ def start_comparison(
         "quantized_logs": [],
         "regular_model_id": resolved_a,
         "quantized_model_id": resolved_b,
-        "regular_gguf_path": resolve_gguf_variant_path(resolved_a, regular_quant_mode),
-        "quantized_gguf_path": resolve_gguf_variant_path(resolved_b, quant_mode),
+        "phase_a_display": display_a,
+        "phase_b_display": display_b,
+        "regular_gguf_path": path_a or resolve_gguf_variant_path(resolved_a, mode_a),
+        "quantized_gguf_path": path_b or resolve_gguf_variant_path(resolved_b, mode_b),
         "current_generation": 0,
         "total_generations": gens if attack_type == "evolutionary" else 0,
     }
@@ -646,13 +713,15 @@ def start_comparison(
         autodos_iterations,
         tree_depth,
         tree_breadth,
-        regular_quant_mode,
-        quant_mode,
+        mode_a,
+        mode_b,
+        display_a,
+        display_b,
         context_mode,
         force_decode_tokens,
         disable_eos_stop,
     )
-    return {"message": "Comparison started"}
+    return {"message": "Comparison started", "phase_a": display_a, "phase_b": display_b}
 
 
 @app.get("/api/attack/compare/status")
@@ -823,6 +892,11 @@ def list_gguf_files():
                 _add_file(os.path.join(gguf_dir, name))
 
     return {"files": files}
+
+
+@app.get("/api/models/catalog")
+def get_models_catalog():
+    return build_model_catalog()
 
 
 @app.get("/api/capabilities")

@@ -1,4 +1,5 @@
 import time
+import torch
 from model import load_model_and_tokenizer, cleanup_model
 from evolutionary_sponge import SystemMonitor
 
@@ -99,13 +100,15 @@ def run_token_busting_attack(
             
             req_start = time.time()
             
+            # Create attention mask to prevent warning with pad_token_id=eos_token_id
+            attention_mask = torch.ones_like(input_ids, dtype=torch.long)
+            
             # Force generation
             output = model.generate(
                 input_ids=input_ids,
+                attention_mask=attention_mask,
                 max_new_tokens=64,
-                do_sample=False,
-                temperature=0.0,
-                top_p=1.0,
+                do_sample=False,  # Greedy decoding
                 pad_token_id=tokenizer.eos_token_id,
                 eos_token_id=tokenizer.eos_token_id,
             )
