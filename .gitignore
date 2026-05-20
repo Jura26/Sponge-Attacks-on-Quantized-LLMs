@@ -4,4 +4,4 @@ backend/__pycache__/
 .env
 */.env
 backend/ggufs/*
-backend/gptq/*
+backend/gptq/*scripts/.env
