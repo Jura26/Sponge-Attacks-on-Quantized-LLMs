@@ -1,7 +1,7 @@
 import time
 import torch
 from model import load_model_and_tokenizer, cleanup_model
-from evolutionary_sponge import SystemMonitor
+from monitoring import SystemMonitor
 
 def generate_bpe_nightmare_prompt(length: int = 500) -> str:
     """
@@ -36,7 +36,7 @@ def run_token_busting_attack(
 ):
     def update(msg: str):
         if progress_callback:
-            progress_callback({"status": "running", "log": msg})
+            progress_callback({"status": "running", "message": msg})
         else:
             print(msg)
 
@@ -160,7 +160,7 @@ def run_token_busting_attack(
     if progress_callback:
         progress_callback({
             "status": "complete",
-            "log": "Token-Busting Complete.",
+            "message": "Token-Busting Complete.",
             "result": result
         })
 

@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
+import API_BASE from '../api';
 import './SystemStats.css';
 
 const Ico = ({ children, size = 14 }) => (
@@ -16,7 +16,7 @@ const SystemStats = () => {
   useEffect(() => {
     const fetchStats = async () => {
       try {
-        const res = await fetch('http://localhost:8000/api/stats');
+        const res = await fetch(`${API_BASE}/api/stats`);
         if (!res.ok) throw new Error('Mrezni odgovor nije u redu');
         setStats(await res.json());
         setError(null);

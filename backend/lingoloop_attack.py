@@ -1,7 +1,7 @@
 import time
 import torch
 from model import load_model_and_tokenizer, cleanup_model
-from evolutionary_sponge import SystemMonitor
+from monitoring import SystemMonitor
 
 
 def generate_lingoloop_prompt() -> str:
@@ -22,7 +22,7 @@ def run_lingoloop_attack(
 ):
     def update(msg: str):
         if progress_callback:
-            progress_callback({"status": "running", "log": msg})
+            progress_callback({"status": "running", "message": msg})
         else:
             print(msg)
 
@@ -131,7 +131,7 @@ def run_lingoloop_attack(
     if progress_callback:
         progress_callback({
             "status": "complete",
-            "log": "LingoLoop Complete.",
+            "message": "LingoLoop Complete.",
             "result": result,
         })
 

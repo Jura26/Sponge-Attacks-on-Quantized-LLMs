@@ -1,7 +1,7 @@
 import time
 import torch
 from model import load_model_and_tokenizer, cleanup_model
-from evolutionary_sponge import SystemMonitor
+from monitoring import SystemMonitor
 
 
 SYSTEM_DIRECTIVES = [
@@ -35,7 +35,7 @@ def run_state_entrapment_attack(
 ):
     def update(msg: str):
         if progress_callback:
-            progress_callback({"status": "running", "log": msg})
+            progress_callback({"status": "running", "message": msg})
         else:
             print(msg)
 
@@ -156,7 +156,7 @@ def run_state_entrapment_attack(
     if progress_callback:
         progress_callback({
             "status": "complete",
-            "log": "State Entrapment Complete.",
+            "message": "State Entrapment Complete.",
             "result": result,
         })
 

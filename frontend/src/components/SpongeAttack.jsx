@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import API_BASE from '../api';
 import './SpongeAttack.css';
 
 const ResultCard = ({ title, result, tag }) => (
@@ -222,7 +223,7 @@ const SpongeAttack = () => {
   useEffect(() => {
     const load = async () => {
       try {
-        const res = await fetch('http://localhost:8000/api/models/catalog');
+        const res = await fetch(`${API_BASE}/api/models/catalog`);
         if (res.ok) {
           const data = await res.json();
           setCatalog(data);
@@ -243,7 +244,7 @@ const SpongeAttack = () => {
     if (!isComparing) return;
     const iv = setInterval(async () => {
       try {
-        const res = await fetch('http://localhost:8000/api/attack/compare/status');
+        const res = await fetch(`${API_BASE}/api/attack/compare/status`);
         if (res.ok) {
           const data = await res.json();
           setComparePhase(data.phase);
@@ -279,7 +280,7 @@ const SpongeAttack = () => {
       context_mode: contextMode,
     });
     try {
-      const res = await fetch(`http://localhost:8000/api/attack/compare?${params}`, { method: 'POST' });
+      const res = await fetch(`${API_BASE}/api/attack/compare?${params}`, { method: 'POST' });
       const data = await res.json();
       if (res.ok) {
         setIsComparing(true);

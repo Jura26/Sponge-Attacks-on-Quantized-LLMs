@@ -7,7 +7,7 @@ import os
 import logging
 import traceback
 from model import load_model_and_tokenizer, cleanup_model, tokenize_for_attack
-from evolutionary_sponge import SystemMonitor
+from monitoring import SystemMonitor
 
 logger = logging.getLogger(__name__)
 
