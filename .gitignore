@@ -6,3 +6,4 @@ backend/__pycache__/
 backend/ggufs/*
 backend/gptq/*scripts/.env
 backend/hf/
+backend/gptq/*
