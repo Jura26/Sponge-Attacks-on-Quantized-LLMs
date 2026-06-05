@@ -128,6 +128,15 @@ const PhasePanel = ({
           >
             GPTQ (GPTQModel)
           </button>
+          <button
+            type="button"
+            className={`backend-btn ${backend === 'hf' ? 'backend-btn-active' : ''}`}
+            onClick={() => onBackendChange('hf')}
+            disabled={disabled || !family.hf?.available}
+            title={family.hf?.error || ''}
+          >
+            HF FP16 (transformers)
+          </button>
         </div>
       </div>
 
@@ -147,7 +156,7 @@ const PhasePanel = ({
             ))}
           </select>
         </div>
-      ) : (
+      ) : backend === 'gptq' ? (
         <div className="phase-field phase-gptq-info">
           <span className="control-label">Preciznost</span>
           <p className="gptq-fixed">4-bit (GPTQModel)</p>
@@ -156,6 +165,17 @@ const PhasePanel = ({
           )}
           {!family.gptq?.available && (
             <p className="phase-hint phase-hint-warn">{family.gptq?.error || 'GPTQ nije dostupan'}</p>
+          )}
+        </div>
+      ) : (
+        <div className="phase-field phase-gptq-info">
+          <span className="control-label">Preciznost</span>
+          <p className="gptq-fixed">FP16 (transformers)</p>
+          {family.hf?.repo && (
+            <p className="phase-hint">{family.hf.repo}</p>
+          )}
+          {!family.hf?.available && (
+            <p className="phase-hint phase-hint-warn">{family.hf?.error || 'HF FP16 nije dostupan'}</p>
           )}
         </div>
       )}
@@ -197,6 +217,7 @@ const SpongeAttack = () => {
     const fam = families.find(f => f.id === familyA);
     if (!fam) return false;
     if (backendA === 'gptq') return fam.gptq?.available;
+    if (backendA === 'hf') return fam.hf?.available;
     return fam.gguf_variants?.some(v => v.id === variantA && v.available);
   }, [families, familyA, backendA, variantA]);
 
@@ -204,6 +225,7 @@ const SpongeAttack = () => {
     const fam = families.find(f => f.id === familyB);
     if (!fam) return false;
     if (backendB === 'gptq') return fam.gptq?.available;
+    if (backendB === 'hf') return fam.hf?.available;
     return fam.gguf_variants?.some(v => v.id === variantB && v.available);
   }, [families, familyB, backendB, variantB]);
 
@@ -316,10 +338,13 @@ const SpongeAttack = () => {
       <div className="console-intro">
         <p>
           Usporedi dva profila: odaberi <strong>model</strong>, zatim <strong>metodu kvantizacije</strong>
-          (GGUF s preciznošću ili GPTQ 4-bit), pa pokreni napad.
+          (GGUF s preciznoscu, GPTQ 4-bit ili HF FP16), pa pokreni napad.
         </p>
         {catalog?.gguf_dir && (
           <p className="console-intro-meta">GGUF mapa: {catalog.gguf_dir}</p>
+        )}
+        {catalog?.hf_dir && (
+          <p className="console-intro-meta">HF mapa: {catalog.hf_dir}</p>
         )}
       </div>
 

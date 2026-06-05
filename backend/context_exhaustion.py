@@ -192,7 +192,7 @@ def run_context_exhaustion(
                         if force_decode_tokens > max_new_tokens:
                              max_new_tokens = force_decode_tokens
                         min_new_tokens = max_new_tokens
-                        eos_token_id = None if disable_eos_stop else tokenizer.eos_token_id
+                        eos_token_id = tokenizer.eos_token_id
 
                         decode_start = time.perf_counter()
                         with torch.no_grad():

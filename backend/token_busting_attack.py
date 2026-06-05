@@ -1,6 +1,23 @@
+import os
 import time
 import torch
-from model import load_model_and_tokenizer, cleanup_model
+from model import load_model_and_tokenizer, cleanup_model, tokenize_for_attack
+
+
+def _effective_context_limit(model) -> int:
+    context_limit = getattr(model.config, "max_position_embeddings", None)
+    if context_limit is None:
+        context_limit = getattr(model.config, "n_positions", None)
+
+    max_override = int(os.environ.get("SPONGE_MAX_CONTEXT", 0))
+    if max_override > 0:
+        return min(context_limit, max_override) if context_limit else max_override
+
+    gguf_ctx = int(os.environ.get("SPONGE_GGUF_CTX", 0))
+    if gguf_ctx > 0:
+        return min(context_limit, gguf_ctx) if context_limit else gguf_ctx
+
+    return context_limit or 4096
 from monitoring import SystemMonitor
 
 def generate_bpe_nightmare_prompt(length: int = 500) -> str:
@@ -12,16 +29,19 @@ def generate_bpe_nightmare_prompt(length: int = 500) -> str:
     # Combining emojis, zero-width joiners, and obscure scripts
     nightmare_chars = [
         "👩‍👩‍👦‍👦", "\u200D", "_\u200B", "a\u0328", "\U000e0061\U000e0062",
-        "أ", "﷽", "𒈙", "𒐫", " ﷺ", ":_:", "><", "```", "'''", "[[[", "]]]",
-        "🧑🏽‍🚀", "👨‍👩‍👧‍👦", "🏳️‍🌈", "🏴‍☠️", "🤦🏿‍♂️", "🧠", "🧬", "🪐",
-        "🇺🇳", "🇺🇸", "🇯🇵", "🇫🇷", "🇩🇪", "🇬🇧", "🇺🇦",
-        "e\u0301", "o\u0308", "n\u0303", "a\u030a", "u\u0308", "i\u0307",
-        "\u200C", "\u200E", "\u200F", "\u2060", "\u2061", "\u2062", "\u2063",
-        "\uFE0E", "\uFE0F", "\u034F", "\u00AD", "\u00A0",
-        "अ", "आ", "इ", "उ", "ए", "क", "ष",
-        "語", "漢", "語", "字", "かな", "カナ",
-        "😊", "😂", "🤖", "💥", "✨", "🔥", "⚡",
-        "=!=", "====", "::::", "////", "\\\\", "----", "____",
+    "أ", "﷽", "𒈙", "𒐫", " ﷺ", ":_:", "><", "```", "'''", "[[[", "]]]",
+    "🧑🏽‍🚀", "👨‍👩‍👧‍👦", "🏳️‍🌈", "🏴‍☠️", "🤦🏿‍♂️", "🧠", "🧬", "🪐",
+    "🇺🇳", "🇺🇸", "🇯🇵", "🇫🇷", "🇩🇪", "🇬🇧", "🇺🇦",
+    "e\u0301", "o\u0308", "n\u0303", "a\u030a", "u\u0308", "i\u0307",
+    "\u200C", "\u200E", "\u200F", "\u2060", "\u2061", "\u2062", "\u2063",
+    "\uFE0E", "\uFE0F", "\u034F", "\u00AD", "\u00A0",
+    "अ", "आ", "इ", "उ", "ए", "क", "ष",
+    "語", "漢", "語", "字", "かな", "カナ",
+    "😊", "😂", "🤖", "💥", "✨", "🔥", "⚡",
+    "=!=", "====", "::::", "////", "\\\\", "----", "____",
+    "\u202E", "\u2066", "\u2067", "\u2068", "\u2069", "\u180E",
+    "\U0001F469\u200D\U0001F52C", "\U0001F469\u200D\U0001F9AF", "\U0001F9D1\u200D\U0001F692",
+    "\U0001F9D1\u200D\U0001F52C", "\U0001F9D1\u200D\U0001F393", "\U0001F469\u200D\U0001F9D1\u200D\U0001F466",
     ]
     prompt = ""
     for i in range(length):
@@ -66,9 +86,7 @@ def run_token_busting_attack(
     total_input_chars = 0
     last_prompt = ""
     last_output_text = ""
-    context_limit = getattr(model.config, "max_position_embeddings", None)
-    if context_limit is None:
-        context_limit = getattr(model.config, "n_positions", 4096)
+    context_limit = _effective_context_limit(model)
 
     try:
         for i in range(num_requests):
@@ -78,7 +96,7 @@ def run_token_busting_attack(
             prompt = generate_bpe_nightmare_prompt(600 + i*100)
             last_prompt = prompt
 
-            input_batch = tokenizer(prompt, return_tensors="pt")
+            input_batch = tokenize_for_attack(tokenizer, prompt, device)
             input_ids = input_batch.input_ids
             prompt_token_count = input_ids.shape[1]
             update(f"Formatted {len(prompt)} characters. Tokenizer exploded this into {prompt_token_count} tokens!")
@@ -86,12 +104,12 @@ def run_token_busting_attack(
                 f"Token-Busting: request {i+1} input tokens={prompt_token_count}, chars={len(last_prompt)}"
             )
 
-            # Respect context window: keep room for generation tokens.
-            max_prompt_tokens = max(1, int(context_limit) - 64)
+            # Respect context window: keep minimal room for generation tokens.
+            max_prompt_tokens = max(1, int(context_limit) - 1)
             if prompt_token_count > max_prompt_tokens:
                 input_ids = input_ids[:, :max_prompt_tokens]
                 prompt_token_count = input_ids.shape[1]
-                last_prompt = tokenizer.decode(input_ids[0], skip_special_tokens=True)
+                last_prompt = tokenizer.decode(input_ids[0].tolist(), skip_special_tokens=True)
                 update(
                     f"Prompt truncated to {prompt_token_count} tokens to fit context window ({context_limit})."
                 )
@@ -101,13 +119,14 @@ def run_token_busting_attack(
             req_start = time.time()
             
             # Create attention mask to prevent warning with pad_token_id=eos_token_id
-            attention_mask = torch.ones_like(input_ids, dtype=torch.long)
+            attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=input_ids.device)
             
-            # Force generation
+            # Generate up to the remaining context window.
+            max_new_tokens = max(1, int(context_limit) - prompt_token_count)
             output = model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                max_new_tokens=64,
+                max_new_tokens=max_new_tokens,
                 do_sample=False,  # Greedy decoding
                 pad_token_id=tokenizer.eos_token_id,
                 eos_token_id=tokenizer.eos_token_id,
@@ -118,7 +137,7 @@ def run_token_busting_attack(
             
             output_tokens = output.shape[1] - input_ids.shape[1]
             last_output_text = tokenizer.decode(
-                output[0][input_ids.shape[1]:],
+                output[0][input_ids.shape[1]:].tolist(),
                 skip_special_tokens=True,
             )
             

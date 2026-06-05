@@ -35,6 +35,8 @@ MODEL_FAMILIES: dict[str, dict[str, Any]] = {
         "gguf_basename": "llama",
         "gptq_env": "SPONGE_GPTQ_MODEL_MISTRAL7B",
         "default_gptq": "ModelCloud/Llama-3.2-3B-Instruct-gptqmodel-4bit-vortex-v3",
+        "hf_env": "SPONGE_HF_MODEL_LLAMA3",
+        "default_hf": "meta-llama/Llama-3.2-3B",
         "gguf_variants": ["f16", "q8_0", "q4_k_m", "q2_k"],
     },
     "Qwen": {
@@ -42,6 +44,8 @@ MODEL_FAMILIES: dict[str, dict[str, Any]] = {
         "gguf_basename": "qwen",
         "gptq_env": "SPONGE_GPTQ_MODEL_GPT2",
         "default_gptq": "Qwen/Qwen2.5-3B-Instruct-GPTQ-Int4",
+        "hf_env": "SPONGE_HF_MODEL_QWEN",
+        "default_hf": "Qwen/Qwen2.5-3B-Instruct",
         "gguf_variants": ["f16", "q8_0", "q4_k_m", "q2_k"],
     },
     "Hunyuan": {
@@ -49,6 +53,8 @@ MODEL_FAMILIES: dict[str, dict[str, Any]] = {
         "gguf_basename": "hunyuan",
         "gptq_env": "SPONGE_GPTQ_MODEL_OPT_6_7B",
         "default_gptq": "tencent/Hunyuan-4B-Instruct-GPTQ-Int4",
+        "hf_env": "SPONGE_HF_MODEL_HUNYUAN",
+        "default_hf": "tencent/Hunyuan-4B-Instruct",
         "gguf_variants": ["f16", "q8_0", "q4_k_m", "q2_k"],
     },
 }
@@ -73,6 +79,13 @@ def _gguf_dir() -> str:
     if gguf_path and os.path.isfile(gguf_path):
         return os.path.dirname(gguf_path)
     return ""
+
+
+def _hf_dir() -> str:
+    hf_dir = os.environ.get("SPONGE_HF_DIR", "").strip()
+    if hf_dir:
+        return hf_dir
+    return os.path.join(os.path.dirname(__file__), "hf")
 
 
 def list_gguf_files_for_family(family_id: str) -> list[str]:
@@ -127,6 +140,36 @@ def resolve_gptq_repo(family_id: str) -> str:
     return repo
 
 
+def resolve_hf_repo(family_id: str) -> str:
+    family = MODEL_FAMILIES.get(family_id)
+    if not family:
+        raise ValueError(f"Unknown model family: {family_id}")
+
+    env_key = family.get("hf_env", "")
+    repo = os.environ.get(env_key, "").strip() if env_key else ""
+    if not repo:
+        repo = os.environ.get("SPONGE_HF_MODEL_ID", "").strip()
+    if not repo:
+        repo = (family.get("default_hf") or "").strip()
+    if not repo:
+        raise RuntimeError(
+            f"No HF checkpoint configured for {family['label']}. "
+            f"Set {env_key} or SPONGE_HF_MODEL_ID in backend/.env"
+        )
+    return repo
+
+
+def resolve_hf_local_path(family_id: str) -> str | None:
+    repo = resolve_hf_repo(family_id)
+    hf_dir = _hf_dir()
+    if not hf_dir:
+        return None
+    local_path = os.path.join(hf_dir, repo)
+    if os.path.isfile(os.path.join(local_path, "config.json")):
+        return local_path
+    return None
+
+
 def resolve_attack_target(
     family_id: str,
     backend: str,
@@ -150,6 +193,25 @@ def resolve_attack_target(
             "gguf_variant": "",
             "gptq_repo": repo,
             "display": f"{label} · GPTQ 4-bit ({repo})",
+        }
+
+    if backend == "hf":
+        repo = resolve_hf_repo(family_id)
+        path = resolve_hf_local_path(family_id)
+        if not path:
+            raise RuntimeError(
+                f"HF model for {label} not found in SPONGE_HF_DIR. "
+                "Run scripts/download_hf_models.py to download it first."
+            )
+        return {
+            "family_id": family_id,
+            "model_id": family_id,
+            "quant_mode": "hf-fp16",
+            "backend": "hf",
+            "gguf_variant": "",
+            "hf_repo": repo,
+            "hf_path": path,
+            "display": f"{label} · HF FP16 ({repo})",
         }
 
     variant = (gguf_variant or "q4_k_m").strip().lower()
@@ -179,9 +241,10 @@ def build_model_catalog() -> dict:
     """Catalog for the frontend: families, variants on disk, GPTQ availability."""
     import torch
 
-    from model import gptq_available
+    from model import gptq_available, hf_available
 
     gguf_dir = _gguf_dir()
+    hf_dir = _hf_dir()
     families = []
 
     for family_id, meta in MODEL_FAMILIES.items():
@@ -204,6 +267,22 @@ def build_model_catalog() -> dict:
             gptq_ok = False
             gptq_error = str(exc)
 
+        hf_repo = None
+        hf_path = None
+        hf_error = None
+        try:
+            hf_repo = resolve_hf_repo(family_id)
+            hf_path = resolve_hf_local_path(family_id)
+            hf_ok = bool(hf_available() and hf_path)
+        except Exception as exc:
+            hf_ok = False
+            hf_error = str(exc)
+        if not hf_error:
+            if not hf_available():
+                hf_error = "Install transformers in the backend venv"
+            elif not hf_path:
+                hf_error = "Run scripts/download_hf_models.py to pre-download"
+
         families.append({
             "id": family_id,
             "label": meta["label"],
@@ -215,9 +294,17 @@ def build_model_catalog() -> dict:
                 "label": "GPTQ 4-bit (GPTQModel)",
                 "error": gptq_error,
             },
+            "hf": {
+                "available": hf_ok,
+                "repo": hf_repo,
+                "label": "HF FP16 (transformers)",
+                "path": hf_path,
+                "error": hf_error,
+            },
         })
 
     return {
         "gguf_dir": gguf_dir or None,
+        "hf_dir": hf_dir or None,
         "families": families,
     }

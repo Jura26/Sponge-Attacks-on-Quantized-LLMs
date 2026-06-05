@@ -12,6 +12,8 @@ from model_catalog import (
     MODEL_FAMILIES,
     resolve_gguf_path_for_variant,
     resolve_gptq_repo,
+    resolve_hf_local_path,
+    resolve_hf_repo,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -130,11 +132,13 @@ class GGUFModelAdapter:
             in_toks = list(input_ids[0])
 
         prompt = self.llm.detokenize(in_toks).decode("utf-8", errors="ignore")
+        stop = _kwargs.get("stop")
         out = self.llm.create_completion(
             prompt=prompt,
             max_tokens=int(max_new_tokens),
             temperature=float(temperature if do_sample else 0.0),
             top_p=float(top_p),
+            stop=stop,
             echo=False,
         )
         gen_text = out["choices"][0].get("text", "")
@@ -216,6 +220,14 @@ def gptq_available() -> bool:
         return False
 
 
+def hf_available() -> bool:
+    try:
+        import transformers  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 def _quant_mode_to_gguf_variant(quant_mode: str) -> str:
     inv = {v: k for k, v in GGUF_VARIANT_TO_MODE.items()}
     return inv.get(quant_mode, "q4_k_m")
@@ -278,6 +290,9 @@ def _normalize_quant_mode(quantize) -> str:
         "gptq": "gptq",
         "gptq-int4": "gptq",
         "gptq-4bit": "gptq",
+        "hf": "hf-fp16",
+        "hf-fp16": "hf-fp16",
+        "transformers-fp16": "hf-fp16",
         # Legacy PyTorch quant names → GGUF compare path
         "bnb-nf4": "gguf-q4",
         "bnb-fp4": "gguf-q4",
@@ -285,6 +300,110 @@ def _normalize_quant_mode(quantize) -> str:
         "int8-cpu": "gguf-q8",
     }
     return aliases.get(mode, "gguf-f16")
+
+
+def _resolve_hf_model_hint(model_id: str) -> tuple[str, str | None]:
+    """Return (model_ref, repo_id) for HF loading with local-only preference."""
+    model_id = (model_id or "").strip()
+    if not model_id:
+        raise RuntimeError("HF backend needs a model id or family key.")
+
+    if os.path.isabs(model_id) or model_id.startswith(("./", "../")):
+        if os.path.isdir(model_id):
+            return model_id, None
+        raise RuntimeError(f"HF backend cannot find local path {model_id!r}")
+
+    if model_id in MODEL_FAMILIES:
+        repo = resolve_hf_repo(model_id)
+        local_path = resolve_hf_local_path(model_id)
+        return (local_path or repo), repo
+
+    if "/" in model_id and not model_id.startswith("/"):
+        hf_dir = os.environ.get("SPONGE_HF_DIR", "").strip()
+        if hf_dir:
+            candidate = os.path.join(hf_dir, model_id)
+            if os.path.isdir(candidate):
+                return candidate, model_id
+        return model_id, model_id
+
+    raise RuntimeError(
+        f"HF backend cannot resolve model id '{model_id}'. "
+        "Use a family id (Llama3, Qwen, Hunyuan) or a HF repo id."
+    )
+
+
+def _load_hf_fp16_model(model_id: str):
+    try:
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+    except ImportError as exc:
+        raise RuntimeError(
+            "transformers is not installed. Install it in the backend venv to use HF FP16."
+        ) from exc
+
+    model_ref, repo = _resolve_hf_model_hint(model_id)
+    trust_remote = os.environ.get("SPONGE_HF_TRUST_REMOTE_CODE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+    logger.info(f"⚙️  Loading HF FP16 via transformers: {model_ref}")
+
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_ref,
+            torch_dtype=torch.float16,
+            device_map="auto",
+            local_files_only=True,
+            trust_remote_code=trust_remote,
+        )
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_ref,
+            use_fast=False,
+            local_files_only=True,
+            trust_remote_code=trust_remote,
+        )
+    except Exception as exc:
+        repo_hint = repo or model_ref
+        raise RuntimeError(
+            f"HF FP16 model '{repo_hint}' not available locally. "
+            "Run scripts/download_hf_models.py to pre-download it."
+        ) from exc
+
+    if getattr(tokenizer, "pad_token_id", None) is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+
+    # Apply optional context cap
+    max_context_override = int(os.environ.get("SPONGE_MAX_CONTEXT", "0"))
+    if max_context_override > 0:
+        native_ctx = getattr(model.config, "max_position_embeddings", None)
+
+        if native_ctx is not None:
+            model.config.max_position_embeddings = min(
+                native_ctx,
+                max_context_override,
+            )
+            logger.info(
+                f"📏 Context limited to {model.config.max_position_embeddings} "
+                f"(native={native_ctx})"
+            )
+        else:
+            model.config.max_position_embeddings = max_context_override
+            logger.info(
+                f"📏 Context set to {model.config.max_position_embeddings}"
+            )
+
+    device = "cpu"
+    try:
+        param = next(model.parameters())
+        if param.device.type == "cuda":
+            device = "cuda"
+    except StopIteration:
+        pass
+
+    logger.info("✅ Model ready — HF FP16 backend (transformers).")
+    return tokenizer, model, device, "hf-fp16"
 
 
 def resolve_gguf_variant_path(model_id: str, quant_mode: str) -> str:
@@ -533,6 +652,8 @@ def load_model_and_tokenizer(model_id: str, quantize=False):
     quant_mode = _normalize_quant_mode(quantize)
     if quant_mode == "gptq":
         return _load_gptq_model(model_id)
+    if quant_mode == "hf-fp16":
+        return _load_hf_fp16_model(model_id)
     supported_modes = set(GGUF_VARIANT_TOKENS.keys())
     if quant_mode not in supported_modes:
         quant_mode = "gguf-f16"

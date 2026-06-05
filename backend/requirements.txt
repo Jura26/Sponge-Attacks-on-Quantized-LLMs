@@ -4,3 +4,8 @@ psutil
 torch
 llama-cpp-python
 python-dotenv
+transformers
+huggingface_hub
+accelerate
+safetensors
+sentencepiece

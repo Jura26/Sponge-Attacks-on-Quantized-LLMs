@@ -1,7 +1,24 @@
+import os
 import time
 import torch
-from model import load_model_and_tokenizer, cleanup_model
+from model import load_model_and_tokenizer, cleanup_model, tokenize_for_attack
 from monitoring import SystemMonitor
+
+
+def _effective_context_limit(model) -> int:
+    context_limit = getattr(model.config, "max_position_embeddings", None)
+    if context_limit is None:
+        context_limit = getattr(model.config, "n_positions", None)
+
+    max_override = int(os.environ.get("SPONGE_MAX_CONTEXT", 0))
+    if max_override > 0:
+        return min(context_limit, max_override) if context_limit else max_override
+
+    gguf_ctx = int(os.environ.get("SPONGE_GGUF_CTX", 0))
+    if gguf_ctx > 0:
+        return min(context_limit, gguf_ctx) if context_limit else gguf_ctx
+
+    return context_limit or 4096
 
 
 SYSTEM_DIRECTIVES = [
@@ -64,9 +81,7 @@ def run_state_entrapment_attack(
     last_prompt = ""
     last_output_text = ""
     history: list[str] = []
-    context_limit = getattr(model.config, "max_position_embeddings", None)
-    if context_limit is None:
-        context_limit = getattr(model.config, "n_positions", 4096)
+    context_limit = _effective_context_limit(model)
 
     try:
         for i in range(num_requests):
@@ -74,50 +89,66 @@ def run_state_entrapment_attack(
             update_eval(f"State Entrapment: turn {i+1}/{num_requests} starting")
 
             prompt = _build_turn(i, history)
-            last_prompt = prompt
 
-            input_batch = tokenizer(prompt, return_tensors="pt")
+            # Isolate and measure only the newly added request input framing
+            current_turn_input = history[-2] + history[-1] + "\n<|assistant|>\n"
+            current_turn_tokens = len(tokenizer.encode(current_turn_input, add_special_tokens=False))
+
+            # Restrict generation target to ONLY what is left of the current turn's 1000 token budget
+            max_new_tokens = max(1, 1000 - current_turn_tokens)
+
+            input_batch = tokenize_for_attack(tokenizer, prompt, device)
             input_ids = input_batch.input_ids
             prompt_token_count = input_ids.shape[1]
 
-            max_new_tokens = max(256, int(context_limit) - prompt_token_count - 1)
-            max_new_tokens = min(max_new_tokens, 2048)
-
-            max_prompt_tokens = max(1, int(context_limit) - max_new_tokens)
+            # The rolling window activates ONLY if the global context limit is completely full
+            max_prompt_tokens = int(context_limit) - max_new_tokens
             if prompt_token_count > max_prompt_tokens:
                 input_ids = input_ids[:, -max_prompt_tokens:]
                 prompt_token_count = input_ids.shape[1]
-                last_prompt = tokenizer.decode(input_ids[0], skip_special_tokens=True)
+                last_prompt = tokenizer.decode(input_ids[0].tolist(), skip_special_tokens=True)
                 update(
-                    f"Prompt truncated to {prompt_token_count} tokens to fit context window ({context_limit})."
+                    f"Context capacity reached ({context_limit}). Rolling window activated: prompt truncated to {prompt_token_count} tokens."
                 )
+            else:
+                last_prompt = prompt
 
             total_input_tokens += prompt_token_count
             total_input_chars += len(last_prompt)
             update_eval(
                 f"State Entrapment: turn {i+1} input tokens={prompt_token_count}, chars={len(last_prompt)}"
             )
-            update(f"Targeting up to {max_new_tokens} output tokens.")
+            update(f"Targeting up to {max_new_tokens} output tokens (Turn total budget: 1000).")
 
             req_start = time.time()
-            # Create attention mask to prevent warning with pad_token_id=eos_token_id
-            attention_mask = torch.ones_like(input_ids, dtype=torch.long)
-            output = model.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,  # Greedy decoding
-                pad_token_id=tokenizer.eos_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-            )
+            attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=input_ids.device)
+            gen_kwargs = {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "max_new_tokens": max_new_tokens,
+                "do_sample": True,
+                "temperature": 0.8,
+                "top_p": 0.9,
+                "pad_token_id": tokenizer.eos_token_id,
+                "eos_token_id": tokenizer.eos_token_id,
+            }
+
+            output = model.generate(**gen_kwargs)
             req_end = time.time()
 
             req_latency = req_end - req_start
             output_tokens = output.shape[1] - input_ids.shape[1]
             last_output_text = tokenizer.decode(
-                output[0][input_ids.shape[1]:],
+                output[0][input_ids.shape[1]:].tolist(),
                 skip_special_tokens=True,
             )
+
+            # Defensive post-generation truncation check to ensure history bounds stay clean
+            asst_tokens = tokenizer.encode(last_output_text, add_special_tokens=False)
+            if current_turn_tokens + len(asst_tokens) > 1000:
+                allowed_asst_tokens = max(0, 1000 - current_turn_tokens)
+                asst_tokens = asst_tokens[:allowed_asst_tokens]
+                last_output_text = tokenizer.decode(asst_tokens, skip_special_tokens=False)
 
             history.append(f"<|assistant|>\n{last_output_text}\n")
 

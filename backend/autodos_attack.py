@@ -17,11 +17,30 @@ Core ideas adapted for local causal-LM targets (GPT-2, OPT, etc.):
      prevent the model from producing short, repetitive answers.
 """
 
+import os
 import time
 import random
 import torch
 from model import load_model_and_tokenizer, cleanup_model
 from monitoring import SystemMonitor
+
+
+
+
+def _effective_context_limit(model) -> int:
+    context_limit = getattr(model.config, "max_position_embeddings", None)
+    if context_limit is None:
+        context_limit = getattr(model.config, "n_positions", None)
+
+    max_override = int(os.environ.get("SPONGE_MAX_CONTEXT", 0))
+    if max_override > 0:
+        return min(context_limit, max_override) if context_limit else max_override
+
+    gguf_ctx = int(os.environ.get("SPONGE_GGUF_CTX", 0))
+    if gguf_ctx > 0:
+        return min(context_limit, gguf_ctx) if context_limit else gguf_ctx
+
+    return context_limit or 4096
 
 
 # ── Seed Topics & Decomposition Templates ────────────────────
@@ -154,11 +173,7 @@ def run_autodos_attack(
         )
 
         # Model context limit
-        context_limit = getattr(
-            model.config, "max_position_embeddings", None
-        )
-        if context_limit is None:
-            context_limit = getattr(model.config, "n_positions", 1024)
+        context_limit = _effective_context_limit(model)
 
         if progress_callback:
             progress_callback({
@@ -198,7 +213,7 @@ def run_autodos_attack(
                 })
 
             # Tokenize and truncate to fit context (leave room for output)
-            max_gen_tokens = min(2048, context_limit - 1)
+            max_gen_tokens = max(1, context_limit - 1)
             max_input_len = max(1, context_limit - 10)
             inputs = tokenizer(
                 prompt_text,
@@ -234,12 +249,19 @@ def run_autodos_attack(
                 if "attention_mask" not in inputs:
                     inputs["attention_mask"] = torch.ones_like(inputs.input_ids)
                 
+                gen_kwargs = {
+                    "max_new_tokens": actual_max_gen,
+                    "do_sample": True,
+                    "temperature": 0.8,
+                    "top_p": 0.9,
+                    "pad_token_id": tokenizer.eos_token_id,
+                    "eos_token_id": tokenizer.eos_token_id,
+                }
+
                 with torch.no_grad():
                     out = model.generate(
                         **inputs,
-                        max_new_tokens=actual_max_gen,
-                        do_sample=False,  # Greedy decoding for stability and speed
-                        pad_token_id=tokenizer.eos_token_id,
+                        **gen_kwargs,
                     )
                 output_tokens = out.shape[1] - input_len
                 generated_text = tokenizer.decode(

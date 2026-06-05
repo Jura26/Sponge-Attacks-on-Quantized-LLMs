@@ -84,6 +84,17 @@ def _dispatch_attack(
         )
 
 
+def _resolve_logged_quant_mode(requested_mode: str | None, result: dict | None = None) -> str | None:
+    if isinstance(result, dict):
+        label = result.get("quant_label") or result.get("quant_mode")
+        if label:
+            return label
+    if requested_mode and str(requested_mode).startswith("gguf"):
+        last = get_last_gguf_selection().get("quant_mode")
+        return last or requested_mode
+    return requested_mode
+
+
 def sponge_attack_worker(
     model_id: str,
     gens: int,
@@ -128,7 +139,7 @@ def sponge_attack_worker(
             attack_state["is_running"] = False
             attack_state["best_result"] = data.get("result")
             attack_state["logs"].append("Attack Complete!")
-            actual_quant_mode = get_last_gguf_selection().get("quant_mode") or quant_mode
+            actual_quant_mode = _resolve_logged_quant_mode(quant_mode, data.get("result"))
             payload = {
                 "attack_type": attack_type,
                 "model_id": model_id,
@@ -210,7 +221,10 @@ def _make_comparison_callback(target_logs_key: str, meta: dict | None = None):
             key = "regular_result" if target_logs_key == "regular_logs" else "quantized_result"
             comparison_state[key] = data.get("result")
             comparison_state[target_logs_key].append("Phase complete!")
-            actual_quant_mode = get_last_gguf_selection().get("quant_mode") or (meta.get("quant_mode") if meta else None)
+            actual_quant_mode = _resolve_logged_quant_mode(
+                meta.get("quant_mode") if meta else None,
+                data.get("result"),
+            )
             payload = {
                 "attack_type": meta.get("attack_type") if meta else None,
                 "model_id": meta.get("model_id") if meta else None,
@@ -250,6 +264,14 @@ def comparison_worker(
     """Run the sponge attack twice: phase A config, then phase B config."""
     import torch
 
+    def _maybe_gguf_path(model_id: str, mode: str) -> str | None:
+        if str(mode or "").startswith("gguf"):
+            try:
+                return resolve_gguf_variant_path(model_id, mode)
+            except Exception:
+                return None
+        return None
+
     label_a = phase_a_display or f"{model_id_a} ({regular_quant_mode})"
     label_b = phase_b_display or f"{model_id_b} ({quant_mode})"
 
@@ -262,7 +284,7 @@ def comparison_worker(
             print(f"[main.py] VRAM before baseline: {allocated:.2f} GB")
 
         comparison_state["phase"] = "regular"
-        comparison_state["regular_gguf_path"] = resolve_gguf_variant_path(model_id_a, regular_quant_mode)
+        comparison_state["regular_gguf_path"] = _maybe_gguf_path(model_id_a, regular_quant_mode)
         comparison_state["regular_logs"].append(f"=== Phase 1/2: {label_a} ===")
         random.seed(seed)
 
@@ -300,7 +322,10 @@ def comparison_worker(
             disable_eos_stop=disable_eos_stop,
             progress_callback=_make_comparison_callback("regular_logs", regular_meta),
         )
-        comparison_state["regular_gguf_path"] = get_last_gguf_selection().get("path")
+        if str(regular_quant_mode).startswith("gguf"):
+            comparison_state["regular_gguf_path"] = get_last_gguf_selection().get("path")
+        else:
+            comparison_state["regular_gguf_path"] = None
 
         print("[main.py] Verifying VRAM is clear between phases...")
         gc.collect()
@@ -311,7 +336,7 @@ def comparison_worker(
 
         comparison_state["phase"] = "quantized"
         comparison_state["current_generation"] = 0
-        comparison_state["quantized_gguf_path"] = resolve_gguf_variant_path(model_id_b, quant_mode)
+        comparison_state["quantized_gguf_path"] = _maybe_gguf_path(model_id_b, quant_mode)
         comparison_state["quantized_logs"].append(f"=== Phase 2/2: {label_b} ===")
         random.seed(seed)
 
@@ -349,7 +374,10 @@ def comparison_worker(
             disable_eos_stop=disable_eos_stop,
             progress_callback=_make_comparison_callback("quantized_logs", quant_meta),
         )
-        comparison_state["quantized_gguf_path"] = get_last_gguf_selection().get("path")
+        if str(quant_mode).startswith("gguf"):
+            comparison_state["quantized_gguf_path"] = get_last_gguf_selection().get("path")
+        else:
+            comparison_state["quantized_gguf_path"] = None
 
         comparison_state["phase"] = "complete"
         comparison_state["is_running"] = False
@@ -374,6 +402,6 @@ def resolve_compare_phase(
             target["model_id"],
             target["quant_mode"],
             target["display"],
-            target.get("gguf_path"),
+            target.get("gguf_path") or target.get("hf_path"),
         )
     return fallback_model_id, fallback_quant_mode, f"{fallback_model_id} ({fallback_quant_mode})", None

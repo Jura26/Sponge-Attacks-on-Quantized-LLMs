@@ -188,6 +188,22 @@ hf download gpt2
 hf download gpt2-xl
 ```
 
+### 4b. Download HF FP16 models locally (new HF backend)
+
+For the HF FP16 backend, download the three requested models into a local
+folder (default: `backend/hf`) so the backend can load them without network:
+
+```bash
+export HF_TOKEN=hf_your_token_here   # required for Llama
+python scripts/download_hf_models.py
+```
+
+Or download + start backend/frontend in one step:
+
+```bash
+bash scripts/start_with_hf_models.sh
+```
+
 ---
 
 ### 5. Frontend
@@ -245,6 +261,7 @@ Then open `http://localhost:3000` in your browser.
 | `bnb-int8` | `quant_mode=bnb-int8` | 8-bit bitsandbytes |
 | `gguf-llamacpp` | `quant_mode=gguf-llamacpp` | Local GGUF model via llama.cpp backend (third runtime option) |
 | `gptq-int4` | `quant_mode=gptq` with GPTQ model IDs | Only for pre-quantized GPTQ model repos (ID typically contains `gptq`) |
+| `hf-fp16` | `quant_mode=hf-fp16` | Local HF FP16 models via transformers (requires pre-download) |
 | `int8-cpu` | `quant_mode=int8-cpu` | PyTorch dynamic int8 quantization (CPU, may spike RAM on large models) |
 | `int1-sim` | `quant_mode=int1-sim` | Experimental 1-bit simulation (binarized linear weights, not native 1-bit kernels) |
 | `fp32` | CPU fallback | Used automatically when no GPU or GPU kernels non-functional |
@@ -261,6 +278,11 @@ Then open `http://localhost:3000` in your browser.
 | `SPONGE_GGUF_PATH` | Absolute path to local `.gguf` model file for `gguf-llamacpp` mode |
 | `SPONGE_GGUF_CTX` | Context size for llama.cpp backend (default: `4096`) |
 | `SPONGE_GGUF_GPU_LAYERS` | Number of offloaded layers in llama.cpp (default: `-1`, auto/max) |
+| `SPONGE_HF_DIR` | Local folder containing HF FP16 snapshots (default: `backend/hf`) |
+| `SPONGE_HF_MODEL_LLAMA3` | Override HF repo for Llama3 (default: `meta-llama/Llama-3.2-3B`) |
+| `SPONGE_HF_MODEL_QWEN` | Override HF repo for Qwen (default: `Qwen/Qwen2.5-3B-Instruct`) |
+| `SPONGE_HF_MODEL_HUNYUAN` | Override HF repo for Hunyuan (default: `tencent/Hunyuan-4B-Instruct`) |
+| `SPONGE_HF_TRUST_REMOTE_CODE` | Set to `1` only if required by a model (default: `0`) |
 | `SPONGE_ALLOW_CPU_INT8_FALLBACK` | Set to `1` to allow CPU int8 fallback on large models (disabled by default to avoid RAM spikes) |
 
 ```bash
@@ -270,6 +292,7 @@ export SPONGE_ENABLE_BNB_ROCM=1   # optional, only after building ROCm bitsandby
 export SPONGE_GGUF_PATH=/absolute/path/to/model.gguf   # required for gguf-llamacpp mode
 export SPONGE_GGUF_CTX=4096   # optional llama.cpp context
 export SPONGE_GGUF_GPU_LAYERS=-1   # optional llama.cpp offload setting
+export SPONGE_HF_DIR=/absolute/path/to/hf_models   # local HF snapshots
 export SPONGE_ALLOW_CPU_INT8_FALLBACK=1   # optional, enables CPU int8 fallback
 ```
 

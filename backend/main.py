@@ -113,6 +113,11 @@ def start_comparison(
     if comparison_state["is_running"]:
         return {"error": "Comparison already running"}
 
+    def _gguf_path_if_needed(model_id: str, mode: str) -> str | None:
+        if str(mode or "").startswith("gguf"):
+            return resolve_gguf_variant_path(model_id, mode)
+        return None
+
     seed = random.randint(0, 2**31)
 
     legacy_a = model_id_a or model_id
@@ -127,7 +132,7 @@ def start_comparison(
             mode_a = regular_quant_mode or "gguf-f16"
             resolved_a = legacy_a
             display_a = f"{legacy_a} ({mode_a})"
-            path_a = resolve_gguf_variant_path(resolved_a, mode_a)
+            path_a = _gguf_path_if_needed(resolved_a, mode_a)
 
         if model_family_b:
             resolved_b, mode_b, display_b, path_b = resolve_compare_phase(
@@ -137,7 +142,7 @@ def start_comparison(
             mode_b = quant_mode or "gguf-q4"
             resolved_b = legacy_b
             display_b = f"{legacy_b} ({mode_b})"
-            path_b = resolve_gguf_variant_path(resolved_b, mode_b)
+            path_b = _gguf_path_if_needed(resolved_b, mode_b)
     except Exception as exc:
         return {"error": str(exc)}
 
@@ -149,8 +154,8 @@ def start_comparison(
         quantized_model_id=resolved_b,
         phase_a_display=display_a,
         phase_b_display=display_b,
-        regular_gguf_path=path_a or resolve_gguf_variant_path(resolved_a, mode_a),
-        quantized_gguf_path=path_b or resolve_gguf_variant_path(resolved_b, mode_b),
+        regular_gguf_path=path_a or _gguf_path_if_needed(resolved_a, mode_a),
+        quantized_gguf_path=path_b or _gguf_path_if_needed(resolved_b, mode_b),
     )
 
     background_tasks.add_task(

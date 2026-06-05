@@ -1,4 +1,5 @@
 import argparse
+import os
 import time
 
 import random
@@ -19,7 +20,87 @@ PROMPT_LENGTH = 20  # Starting length (short, to amplify output/load)
 MUTATION_RATE = 0.2
 MODEL_ID = "gpt2"   # Default, can be overridden
 # Define a range for dynamic token generation
-MAX_NEW_TOKENS = 1024  # Upper limit for token generation
+MAX_NEW_TOKENS = 0  # 0 disables the cap (use the full context window)
+
+
+
+def _effective_context_limit(model) -> int:
+    context_limit = getattr(model.config, "max_position_embeddings", None)
+    if context_limit is None:
+        context_limit = getattr(model.config, "n_positions", None)
+
+    max_override = int(os.environ.get("SPONGE_MAX_CONTEXT", 0))
+    if max_override > 0:
+        return min(context_limit, max_override) if context_limit else max_override
+
+    gguf_ctx = int(os.environ.get("SPONGE_GGUF_CTX", 0))
+    if gguf_ctx > 0:
+        return min(context_limit, gguf_ctx) if context_limit else gguf_ctx
+
+    return context_limit or 4096
+
+def warmup(model, tokenizer, device, target_temp=85, max_wait=300, model_max_length=None):
+    """Run inference in a loop until GPU reaches target temperature."""
+    if model_max_length is None:
+        model_max_length = 4096
+
+    temp_monitor = SystemMonitor(device=device)
+    current_temp = temp_monitor._get_temp()
+
+    if current_temp == 0:
+        print("  🔥 Warmup skipped (temp sensor unavailable)", flush=True)
+        return
+    if current_temp >= target_temp:
+        print(f"  🔥 Already at {current_temp}°C, skipping warmup", flush=True)
+        return
+
+    print(f"  🔥 Warming up GPU to {target_temp}°C (currently {current_temp}°C)...", flush=True)
+
+    # Same limits as main eval loop — avoids shape mismatches on GGUF backend
+    max_input_len = model_max_length - 50
+
+    start_time = time.time()
+    iteration = 0
+
+    while time.time() - start_time < max_wait:
+        current_temp = temp_monitor._get_temp()
+        print(f"     [{iteration}] {current_temp}°C", end="\r", flush=True)
+
+        if current_temp >= target_temp:
+            print(f"  🔥 Warmup done — {current_temp}°C after {iteration} runs     ", flush=True)
+            return
+
+        try:
+            # ✅ Use same prompt generation + tokenization as main eval — guaranteed compatible
+            warmup_prompt = generate_random_prompt(tokenizer, length=PROMPT_LENGTH)
+
+            inputs = tokenizer(
+                warmup_prompt,
+                return_tensors="pt",
+                truncation=True,
+                max_length=max_input_len
+            ).to(device)
+
+            input_len = inputs.input_ids.shape[1]
+            safe_max_new_tokens = max(1, model_max_length - input_len - 1)
+
+            with torch.no_grad():
+                model.generate(
+                    **inputs,
+                    max_new_tokens=min(128, safe_max_new_tokens),  # short bursts = faster heating
+                    do_sample=False,
+                    pad_token_id=tokenizer.eos_token_id,
+                    eos_token_id=tokenizer.eos_token_id,
+                )
+
+        except Exception as e:
+            print(f"\n  ⚠️ Warmup error: {e}", flush=True)
+            break
+
+        iteration += 1
+
+    current_temp = temp_monitor._get_temp()
+    print(f"  ⚠️ Warmup timed out at {current_temp}°C after {iteration} runs", flush=True)
 
 def cooldown(target_temp=60, max_wait=10, device="cpu"):
     """Wait for hardware to cool down to ensure fair testing."""
@@ -125,97 +206,129 @@ def crossover(p1, p2, tokenizer=None):
 
 def evaluate_population(population, model, tokenizer, device, progress_callback=None):
     scores = []
-    
-    print(f"\nEvaluating {len(population)} prompts...")
+
+    print(f"\nEvaluating {len(population)} prompts...", flush=True)
     if progress_callback:
         progress_callback({"status": "eval", "message": f"Evaluating {len(population)} prompts..."})
-    
-    # Try to find model's max context length
-    model_max_length = getattr(model.config, "max_position_embeddings", None)
-    if model_max_length is None:
-        model_max_length = getattr(model.config, "n_positions", None)
-    
-    # Fallback if unknown (common for some architectures)
-    if model_max_length is None:
-        model_max_length = 4096 # Safe modern default
-        print(f"⚠️ Could not detect model context length. Defaulting to {model_max_length}.")
+
+    model_max_length = _effective_context_limit(model)
+    warmup(model, tokenizer, device, target_temp=85, max_wait=300, model_max_length=model_max_length)
 
     for i, prompt in enumerate(population):
-        # Cool down system before measurement to ensure fairness
+        cooldown(target_temp=85, max_wait=5, device=device)
         if progress_callback:
             progress_callback({"status": "eval", "message": f"  Cooling down before prompt {i+1}/{len(population)}..."})
-        cooldown(target_temp=65, max_wait=5, device=device)
-        
-        print(f"  [{i+1}/{len(population)}] Testing: '{prompt[:30]}...'")
+
+        print(f"  [{i+1}/{len(population)}] Testing: '{prompt[:30]}...'", flush=True)
         if progress_callback:
             progress_callback({"status": "eval", "message": f"  [{i+1}/{len(population)}] Testing: '{prompt[:30]}...'"})
-        
-        monitor = SystemMonitor(device=device)
-        monitor.start()
 
-        generated_tokens = 0
-        try:
-            # --- RUN MODEL GENERATION ---
-            # Truncate prompt to be safe (leave room for generation)
-            max_input_len = model_max_length - 50 
-            inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=max_input_len).to(device)
-            input_len = inputs.input_ids.shape[1]
-            
-            # Ensure attention_mask is included to prevent warning with pad_token_id=eos_token_id
-            if "attention_mask" not in inputs:
-                inputs["attention_mask"] = torch.ones_like(inputs.input_ids)
-            
-            # Calculate remaining space and ensure we generate at least something
-            remaining_context = model_max_length - input_len
-            safe_max_new_tokens = max(1, remaining_context - 1)
-            # Cap the max new tokens so it doesn't run forever on models with huge context sizes
-            safe_max_new_tokens = min(MAX_NEW_TOKENS, safe_max_new_tokens)
-            
-            with torch.no_grad():
-                output = model.generate(
-                    **inputs,
-                    max_new_tokens=safe_max_new_tokens, 
-                    do_sample=False,  # Greedy decoding for stability
-                )
+        # ── These are INSIDE the for-i loop ──────────────────────────────
+        runs = 3
+        run_results = []
+
+        for r in range(runs):
+            generated_tokens = 0
+            generated_text = ""
+            input_len = 0
+
+            monitor = SystemMonitor(device=device)
+            monitor.start()
+
+            try:
+                max_input_len = model_max_length - 50
+                inputs = tokenizer(
+                    prompt,
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=max_input_len
+                ).to(device)
+
+                input_len = inputs.input_ids.shape[1]
+
+                if "attention_mask" not in inputs:
+                    inputs["attention_mask"] = torch.ones_like(inputs.input_ids)
+
+                remaining_context = model_max_length - input_len
+                safe_max_new_tokens = max(1, remaining_context - 1)
+
+                gen_kwargs = {
+                    "max_new_tokens": safe_max_new_tokens,
+                    "do_sample": False,
+                    "pad_token_id": tokenizer.eos_token_id,
+                    "eos_token_id": tokenizer.eos_token_id,
+                }
+
+                with torch.no_grad():
+                    output = model.generate(**inputs, **gen_kwargs)
+
                 generated_tokens = len(output[0]) - input_len
-                generated_text = tokenizer.decode(output[0][input_len:], skip_special_tokens=True)
-            # ---------------------------
-        except Exception as e:
-            print(f"    ❌ Error: {e}")
-            generated_text = f"Error: {str(e)}"
-        finally:
-            monitor.stop(token_count=generated_tokens)
-        
-        score, peak_temp, tps, avg_cpu, avg_gpu, duration, avg_power, energy_joules = monitor.get_score()
-        
-        # CPU load message removed as per user request
-        power_msg = f" | Power: {avg_power:.1f}W | Energy: {energy_joules:.1f}J" if avg_power > 0 else ""
-            
-        scores.append({
-            "prompt": prompt,
-            "score": score,
-            "peak_temp": peak_temp,
-            "tps": tps,
-            # CPU load removed as per user request
-            "avg_gpu": avg_gpu,
-            "duration": duration,
-            "avg_power": avg_power,
-            "energy_joules": energy_joules,
-            "input_tokens": input_len,
-            "output_tokens": generated_tokens,
-            "output": generated_text
-        })
-        temp_str = f"{peak_temp}C" if peak_temp > 0 else "N/A"
-        print(f"    --> Score: {score:.2f} | Temp: {temp_str}{power_msg} | TPS: {tps:.2f}")
-        if progress_callback:
-            progress_callback({
-                "status": "eval", 
-                "message": f"    --> Score: {score:.2f} | Temp: {temp_str}{power_msg} | TPS: {tps:.2f}"
+                generated_text = tokenizer.decode(
+                    output[0][input_len:],
+                    skip_special_tokens=True
+                )
+
+            except Exception as e:
+                print(f"    ❌ Run {r+1} error: {e}", flush=True)
+
+            finally:
+                monitor.stop(token_count=generated_tokens)
+
+            try:
+                score, peak_temp, tps, avg_cpu, avg_gpu, duration, avg_power, energy_joules = monitor.get_score()
+            except Exception as e:
+                print(f"    ❌ get_score() failed run {r+1}: {type(e).__name__}: {e}", flush=True)
+                continue
+
+            print(f"      [run {r+1}/{runs}] score: {score:.2f} | TPS: {tps:.2f}", flush=True)
+
+            # ✅ append AFTER the print, BEFORE the guard
+            run_results.append({
+                "score": score,
+                "peak_temp": peak_temp,
+                "tps": tps,
+                "avg_gpu": avg_gpu,
+                "duration": duration,
+                "avg_power": avg_power,
+                "energy_joules": energy_joules,
+                "input_tokens": input_len,
+                "output_tokens": generated_tokens,
+                "generated_text": generated_text,
             })
 
-    # Sort by score (descending)
+        # ── Back in the for-i loop, AFTER all runs complete ──────────────
+        if not run_results:
+            print(f"  ⚠️ All runs failed for prompt {i+1}, skipping.", flush=True)
+            continue
+
+        def avg(key):
+            return sum(entry[key] for entry in run_results) / len(run_results)
+
+        scores.append({
+            "prompt": prompt,
+            "score": avg("score"),
+            "peak_temp": avg("peak_temp"),
+            "tps": avg("tps"),
+            "avg_gpu": avg("avg_gpu"),
+            "duration": avg("duration"),
+            "avg_power": avg("avg_power"),
+            "energy_joules": avg("energy_joules"),
+            "input_tokens": run_results[0]["input_tokens"],
+            "output_tokens": avg("output_tokens"),
+            "output": run_results[-1].get("generated_text", "")
+        })
+
+        temp_str = f"{avg('peak_temp'):.1f}C"
+        print(f"    --> Score: {avg('score'):.2f} | Temp: {temp_str} | TPS: {avg('tps'):.2f}", flush=True)
+        if progress_callback:
+            progress_callback({
+                "status": "eval",
+                "message": f"    --> Score: {avg('score'):.2f} | Temp: {temp_str} | TPS: {avg('tps'):.2f}"
+            })
+
     scores.sort(key=lambda x: x["score"], reverse=True)
     return scores
+
 
 def run_sponge_attack(model_id, gens=5, pop=10, quantize=False, progress_callback=None):
     quant_mode = quantize if isinstance(quantize, str) else ("gguf-q4" if quantize else "none")
@@ -273,25 +386,37 @@ def run_sponge_attack(model_id, gens=5, pop=10, quantize=False, progress_callbac
         print(f"   Prompt: '{best_of_gen['prompt']}'")
         print(f"   Score: {best_of_gen['score']:.2f} | Peak Temp: {best_of_gen['peak_temp']}C")
         
-        # Selection (Keep Top 50%)
-        top_half = scored_pop[:len(population)//2]
-        parents = [p["prompt"] for p in top_half]
-        
-        # New Population
-        new_pop = parents[:] # Elitism
-        
+        # Selection (Keep Top 50%, deduplicated)
+        top_half = scored_pop[:len(population)//5]
+        seen = set()
+        parents = []
+        for p in top_half:
+            if p["prompt"] not in seen:
+                seen.add(p["prompt"])
+                parents.append(p["prompt"])
+
+        # If we don't have enough unique parents, fill with fresh random prompts
+        while len(parents) < max(2, len(population) // 4):
+            parents.append(generate_random_prompt(tokenizer, length=PROMPT_LENGTH))
+
+        # New Population — always keep at least the best 1 (elitism)
+        new_pop = [parents[0]]
+
         while len(new_pop) < pop:
-            # Crossover
             p1 = random.choice(parents)
             p2 = random.choice(parents)
             child = crossover(p1, p2, tokenizer)
-            
-            # Mutation
-            if random.random() < MUTATION_RATE:
+
+            # ↑ Raise mutation rate and always mutate children from identical parents
+            if p1 == p2 or random.random() < MUTATION_RATE:
                 child = mutate(child, tokenizer)
-            
-            new_pop.append(child)
-            
+
+            # Don't add exact duplicates if pool is still diverse enough
+            if child not in new_pop or len(new_pop) >= pop - 2:
+                new_pop.append(child)
+            else:
+                new_pop.append(generate_random_prompt(tokenizer, length=PROMPT_LENGTH))
+
         population = new_pop
 
     print("\n💀 Attack Search Complete.")
