@@ -39,7 +39,7 @@ def _effective_context_limit(model) -> int:
 
     return context_limit or 4096
 
-def warmup(model, tokenizer, device, target_temp=85, max_wait=300, model_max_length=None):
+def warmup(model, tokenizer, device, target_temp=84, max_wait=300, model_max_length=None):
     """Run inference in a loop until GPU reaches target temperature."""
     if model_max_length is None:
         model_max_length = 4096
@@ -212,7 +212,7 @@ def evaluate_population(population, model, tokenizer, device, progress_callback=
         progress_callback({"status": "eval", "message": f"Evaluating {len(population)} prompts..."})
 
     model_max_length = _effective_context_limit(model)
-    warmup(model, tokenizer, device, target_temp=85, max_wait=300, model_max_length=model_max_length)
+    warmup(model, tokenizer, device, target_temp=84, max_wait=300, model_max_length=model_max_length)
 
     for i, prompt in enumerate(population):
         cooldown(target_temp=85, max_wait=5, device=device)
