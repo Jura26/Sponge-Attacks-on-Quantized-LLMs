@@ -1,6 +1,0 @@
-[
-  {"quant_mode": "gguf-f16", "params": {"num_requests": 5}, "result": {"energy_joules": 15743.15}},
-  {"quant_mode": "gguf-q4", "params": {"num_requests": 5}, "result": {"energy_joules": 12620.96}},
-  {"quant_mode": "gguf-f16", "params": {"num_requests": 10}, "result": {"energy_joules": 31486.55}},
-  {"quant_mode": "gguf-q4", "params": {"num_requests": 10}, "result": {"energy_joules": 25229.92}}
-]
